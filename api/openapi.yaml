@@ -1,0 +1,573 @@
+openapi: 3.1.0
+info:
+  title: notify-relay API
+  version: 1.0.0-draft.1
+  summary: 配信依頼を受け、メールを並行送信する内部サービス
+  description: |
+    notify-relay は、業務アプリ(team-ops-api)から配信依頼を受け取り、
+    送信先サービスの上限に合わせた流量制御・再送・二重配信の防止を行いながらメールを送信し、
+    結果を webhook で返す内部サービスです。業務ロジック(誰に何を送るか)は持ちません。
+
+    通知チャネルはメールだけです。送信は SMTP で行い、ローカルとデモ環境では Mailpit、
+    実運用ではメール送信サービスに接続先を切り替えます(コードは同じ)。
+
+    ## 認証(リクエスト署名)
+    すべてのリクエストに、共有鍵による HMAC-SHA256 署名を付けます。
+    webhook(notify-relay → 業務アプリ)も同じ方式で署名します。
+
+    - `X-Relay-Key-Id`: 署名に使った鍵のID(鍵の入れ替えに対応するため)
+    - `X-Relay-Timestamp`: 送信時刻(UNIX秒)
+    - `X-Relay-Signature`: `v1=` + hex( HMAC-SHA256( 鍵, "{timestamp}.{リクエスト本文のバイト列}" ) )
+
+    受信側は、時刻のずれが5分を超えるリクエストを拒否します(再送攻撃の防止)。
+
+    ## 二重配信の防止
+    配信依頼には `dedupe_key` を必ず付けます。
+    同じ `dedupe_key` で同じ内容の依頼が再度届いた場合は、新たに送信せず、最初の依頼の情報を返します。
+    同じ `dedupe_key` で内容が異なる場合は 409 を返します。
+    `dedupe_key` は受付から7日間保持します。
+
+    ## トレース
+    W3C Trace Context の `traceparent` ヘッダーを受け取り、送信処理と webhook に引き継ぎます。
+
+    ## 個人情報の扱い
+    宛先のメールアドレスは配信処理の間だけ保持し、配信記録と webhook では `recipient_ref`(業務アプリ側の不透明なID)だけを使います。
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://notify-relay:8080
+    description: docker compose 内部ネットワーク
+security:
+  - relaySignature: []
+tags:
+  - name: deliveries
+    description: 配信依頼
+  - name: health
+    description: 死活監視
+
+paths:
+  /v1/deliveries:
+    post:
+      tags: [deliveries]
+      operationId: createDelivery
+      summary: 配信依頼を登録する
+      description: |
+        配信依頼を受け付け、非同期で送信します。受け付けた時点で 202 を返し、
+        送信結果は webhook で通知します。1リクエストの宛先は最大1,000件です。
+        それを超える場合は、業務アプリ側で分割して複数の依頼にします。
+      parameters:
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryRequest'
+            examples:
+              rainCancel:
+                summary: 雨天中止の連絡
+                value:
+                  dedupe_key: notice-01JC9Z8Q3K-batch-1
+                  tenant_ref: team_01JC9Y2M4A
+                  message:
+                    subject: '【中止】11/8(土)の練習'
+                    text: '雨のため、11/8(土)の練習は中止です。'
+                    url: 'https://app.example.com/notices/01JC9Z8Q3K'
+                  recipients:
+                    - recipient_ref: member_01JC9Y5F7B
+                      email: parent1@example.com
+                    - recipient_ref: member_01JC9Y6H2C
+                      email: parent2@example.com
+                  expires_at: '2026-11-08T08:00:00+09:00'
+      responses:
+        '202':
+          description: 新しい依頼として受け付けた
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryAccepted'
+        '200':
+          description: 同じ dedupe_key・同じ内容の依頼が既にあるため、新たには送信しない
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/deliveries/{delivery_id}:
+    get:
+      tags: [deliveries]
+      operationId: getDelivery
+      summary: 配信依頼の進み具合を取得する
+      description: |
+        webhook を受け取り損ねた場合の照合用です。宛先ごとの詳細は返さず、件数の集計だけを返します。
+        受付から7日を過ぎた依頼は 404 になります。
+      parameters:
+        - name: delivery_id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/DeliveryId'
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Traceparent'
+      responses:
+        '200':
+          description: 配信依頼の状態
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: プロセスが生きているか
+      security: []
+      responses:
+        '200':
+          description: 生きている
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: 依頼を受け付けられる状態か(DB接続などを確認)
+      security: []
+      responses:
+        '200':
+          description: 受け付けられる
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: 受け付けられない
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+webhooks:
+  deliveryResults:
+    post:
+      operationId: receiveDeliveryResults
+      summary: '宛先ごとの送信結果(notify-relay → 業務アプリ)'
+      description: |
+        送信結果を一定件数または一定時間ごとにまとめて通知します。
+        送信先URLは notify-relay の設定で固定し、依頼ごとには指定させません(意図しない宛先への送信を防ぐため)。
+
+        - 業務アプリが2xx以外を返した場合、指数バックオフで最大24時間再送します
+        - 同じ `event_id` のイベントが複数回届くことがあるため、業務アプリは `event_id` で重複を除外します
+        - イベントの到着順は保証しません。各結果の `occurred_at` で前後を判断します
+      parameters:
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResultsEvent'
+      responses:
+        '204':
+          description: 受け取った(重複していた場合も 204 を返す)
+        '401':
+          description: 署名が不正。notify-relay は再送せず、エラーとして記録する
+  deliveryCompleted:
+    post:
+      operationId: receiveDeliveryCompleted
+      summary: '配信依頼の全宛先の処理が終わった(notify-relay → 業務アプリ)'
+      description: |
+        すべての宛先が最終状態(delivered / failed / skipped)になった時点で1回通知します。
+        再送や重複の扱いは deliveryResults と同じです。
+      parameters:
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletedEvent'
+      responses:
+        '204':
+          description: 受け取った
+        '401':
+          description: 署名が不正
+
+components:
+  securitySchemes:
+    relaySignature:
+      type: apiKey
+      in: header
+      name: X-Relay-Signature
+      description: 'HMAC-SHA256 署名。計算方法は API 全体の説明を参照'
+
+  parameters:
+    KeyId:
+      name: X-Relay-Key-Id
+      in: header
+      required: true
+      description: 署名に使った共有鍵のID
+      schema:
+        type: string
+        pattern: '^[a-z0-9-]{1,32}$'
+      example: k2026-11
+    Timestamp:
+      name: X-Relay-Timestamp
+      in: header
+      required: true
+      description: 送信時刻(UNIX秒)。受信側は5分を超えるずれを拒否する
+      schema:
+        type: integer
+        format: int64
+      example: 1793502000
+    Signature:
+      name: X-Relay-Signature
+      in: header
+      required: true
+      description: 'v1= に続けて HMAC-SHA256 の16進文字列'
+      schema:
+        type: string
+        pattern: '^v1=[0-9a-f]{64}$'
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: W3C Trace Context
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+
+  schemas:
+    DeliveryId:
+      type: string
+      description: notify-relay が採番する配信依頼のID(ULID)
+      pattern: '^dlv_[0-9A-HJKMNP-TV-Z]{26}$'
+      examples: [dlv_01JC9ZB4X7Q2N6R8T0V2W4Y6Z8]
+
+    DeliveryRequest:
+      type: object
+      additionalProperties: false
+      required: [dedupe_key, tenant_ref, message, recipients]
+      properties:
+        dedupe_key:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._:-]+$'
+          description: 重複防止キー。業務アプリ側で依頼ごとに一意に決める(例:お知らせID+分割番号)
+        tenant_ref:
+          type: string
+          maxLength: 64
+          description: |
+            チームを表す不透明なID。チーム間で公平に送信順を割り当てるために使う(第2弾)。
+            notify-relay はこの値の意味を解釈しない。
+            ログイン用メールなどチームに属さない送信では、固定値 `system` を使う
+        message:
+          $ref: '#/components/schemas/Message'
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/Recipient'
+        expires_at:
+          type: string
+          format: date-time
+          description: この時刻を過ぎても送れなかった宛先は送らずに skipped にする(例:当日朝の中止連絡)
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [subject, text]
+      description: |
+        全宛先に共通の本文。文面は業務アプリ側で確定させて渡す。
+        notify-relay はメールのレイアウトへの当てはめ(共通のヘッダー・フッター)だけを行う
+      properties:
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 200
+        text:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        url:
+          type: string
+          format: uri
+          description: 通知を開いたときの遷移先
+
+    Recipient:
+      type: object
+      additionalProperties: false
+      required: [recipient_ref, email]
+      properties:
+        recipient_ref:
+          type: string
+          maxLength: 64
+          description: 業務アプリ側の宛先ID(不透明な値)。結果の通知ではこの値だけを使う
+        email:
+          type: string
+          format: email
+          maxLength: 254
+
+    DeliveryAccepted:
+      type: object
+      required: [delivery_id, dedupe_key, recipient_count, accepted_at]
+      properties:
+        delivery_id:
+          $ref: '#/components/schemas/DeliveryId'
+        dedupe_key:
+          type: string
+        recipient_count:
+          type: integer
+          minimum: 1
+        accepted_at:
+          type: string
+          format: date-time
+
+    DeliveryStatus:
+      type: object
+      required: [delivery_id, dedupe_key, state, counts, accepted_at]
+      properties:
+        delivery_id:
+          $ref: '#/components/schemas/DeliveryId'
+        dedupe_key:
+          type: string
+        state:
+          type: string
+          enum: [accepted, processing, completed]
+        counts:
+          $ref: '#/components/schemas/ResultCounts'
+        accepted_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+
+    ResultCounts:
+      type: object
+      required: [pending, delivered, failed, skipped]
+      properties:
+        pending:
+          type: integer
+          minimum: 0
+        delivered:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        skipped:
+          type: integer
+          minimum: 0
+
+    RecipientResult:
+      type: object
+      required: [recipient_ref, status, attempts, occurred_at]
+      properties:
+        recipient_ref:
+          type: string
+        status:
+          type: string
+          enum: [delivered, failed, skipped]
+          description: |
+            delivered: 送信先のSMTPサーバー(メール送信サービス、ローカルではMailpit)が受け付けた。
+            受信箱に届いたこと・既読になったことは意味しない(既読は業務アプリ側で管理する)。
+            failed: 再送の上限まで試しても送れなかった。
+            skipped: expires_at を過ぎた、または送信対象外と判断した
+        error_code:
+          type: [string, 'null']
+          enum:
+            - invalid_address
+            - provider_rejected
+            - provider_unavailable
+            - rate_limited
+            - expired
+            - null
+          description: |
+            invalid_address: 宛先の形式不正、またはSMTPサーバーが恒久的に拒否した(5xx)。業務アプリは利用者に宛先の確認を促す。
+            provider_rejected: 宛先以外の理由で恒久的に拒否された。
+            provider_unavailable / rate_limited: 一時的な失敗(4xx・接続不可)。再送の上限まで試しても失敗した場合に返す。
+            expired: expires_at を過ぎたため送らなかった
+        attempts:
+          type: integer
+          minimum: 0
+        occurred_at:
+          type: string
+          format: date-time
+
+    ResultsEvent:
+      type: object
+      required: [event_id, type, delivery_id, dedupe_key, results, sent_at]
+      properties:
+        event_id:
+          type: string
+          pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+          description: イベントの一意なID。業務アプリはこれで重複を除外する
+        type:
+          type: string
+          const: delivery.results
+        delivery_id:
+          $ref: '#/components/schemas/DeliveryId'
+        dedupe_key:
+          type: string
+        results:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/RecipientResult'
+        sent_at:
+          type: string
+          format: date-time
+
+    CompletedEvent:
+      type: object
+      required: [event_id, type, delivery_id, dedupe_key, counts, completed_at, sent_at]
+      properties:
+        event_id:
+          type: string
+          pattern: '^evt_[0-9A-HJKMNP-TV-Z]{26}$'
+        type:
+          type: string
+          const: delivery.completed
+        delivery_id:
+          $ref: '#/components/schemas/DeliveryId'
+        dedupe_key:
+          type: string
+        counts:
+          $ref: '#/components/schemas/ResultCounts'
+        completed_at:
+          type: string
+          format: date-time
+        sent_at:
+          type: string
+          format: date-time
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        errors:
+          type: array
+          description: 入力エラーの詳細(422 のとき)
+          items:
+            type: object
+            required: [pointer, message]
+            properties:
+              pointer:
+                type: string
+                description: 'JSON Pointer(例:/recipients/3/targets/0/email)'
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: JSON として解釈できない
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: 署名が不正、鍵IDが不明、または時刻のずれが大きい
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: 依頼が存在しない、または保持期間(7日)を過ぎた
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: 同じ dedupe_key で内容の異なる依頼が既にある
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: リクエスト本文が上限(2MB)を超えた
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationFailed:
+      description: 入力値が仕様に合わない
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    TooManyRequests:
+      description: 受付の上限を超えた。Retry-After 秒後に再試行する
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unavailable:
+      description: 一時的に受け付けられない(DB停止など)。業務アプリはアウトボックスに保持したまま後で再送する
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
