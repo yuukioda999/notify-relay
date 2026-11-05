@@ -27,7 +27,7 @@
 
 ## 利用例
 
-少年スポーツチーム運営ツール [team-ops-api](https://github.com/yuukioda999/team-ops-api) のお知らせ配信で使用しています。
+少年スポーツチーム運営ツール [team-ops](https://github.com/yuukioda999/team-ops) のお知らせ配信で使用しています。
 
 ## ライセンス
 
