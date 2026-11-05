@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(go build:*)",
+      "Bash(golangci-lint run:*)",
+      "Bash(gofmt:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": ["Read(./.env)"]
+  },
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit", "hooks": [{ "type": "command", "command": "bash .claude/hooks/format.sh" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "bash .claude/hooks/check.sh" }] }
+    ]
+  }
+}

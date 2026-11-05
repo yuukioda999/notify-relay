@@ -1,0 +1,18 @@
+version: "2"
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - revive
+    - unconvert
+  settings:
+    revive:
+      rules:
+        - name: exported
+formatters:
+  enable:
+    - gofmt
+    - goimports
