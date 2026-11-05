@@ -29,7 +29,7 @@ type fakeSMTP struct {
 
 func startFakeSMTP(t *testing.T, rcptReply string) *fakeSMTP {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestSendClassifiesReplies(t *testing.T) {
 }
 
 func TestSendToUnreachableServerIsTemporary(t *testing.T) {
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	ln, _ := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	addr := ln.Addr().String()
 	_ = ln.Close() // nothing listens here any more
 

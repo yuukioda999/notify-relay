@@ -85,6 +85,7 @@ func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) (err error) {
 			placeholders[i] = "(?, ?, ?, ?, ?, ?)"
 			args = append(args, string(d.ID), rc.Ref, rc.Email, string(domain.StatusPending), d.AcceptedAt, d.AcceptedAt)
 		}
+		//nolint:gosec // G202: only "(?, ?, ...)" placeholder groups are concatenated; values are bound
 		_, err = tx.ExecContext(ctx, `INSERT INTO delivery_recipients
 			(delivery_id, recipient_ref, email, status, next_attempt_at, updated_at) VALUES `+strings.Join(placeholders, ","), args...)
 		if err != nil {
@@ -141,12 +142,15 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 		return nil, tx.Commit()
 	}
 
+	// Only "?" placeholders are concatenated into the queries below; the IDs are bound (gosec G202).
 	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	args := append([]any{string(domain.StatusSending), now}, ids...)
+	//nolint:gosec // G202: see above
 	if _, err = tx.ExecContext(ctx, `UPDATE delivery_recipients SET status = ?, updated_at = ? WHERE id IN (`+in+`)`, args...); err != nil {
 		return nil, err
 	}
 
+	//nolint:gosec // G202: see above
 	rows, err = tx.QueryContext(ctx, `SELECT r.id, r.delivery_id, r.email, r.attempts, d.subject, d.body_text, d.url, d.expires_at
 		FROM delivery_recipients r JOIN deliveries d ON d.id = r.delivery_id
 		WHERE r.id IN (`+in+`) ORDER BY r.id`, ids...)

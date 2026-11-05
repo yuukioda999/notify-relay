@@ -148,7 +148,7 @@ func TestNewDeliveryID(t *testing.T) {
 	t.Run("later IDs sort after earlier ones", func(t *testing.T) {
 		a, _ := NewDeliveryID(now, nil)
 		b, _ := NewDeliveryID(now.Add(time.Millisecond), nil)
-		if !(a < b) {
+		if a >= b {
 			t.Fatalf("%s should sort before %s", a, b)
 		}
 	})

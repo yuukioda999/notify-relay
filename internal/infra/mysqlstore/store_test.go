@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -46,7 +47,7 @@ func newDelivery(key string, emails ...string) usecase.NewDelivery {
 		Message:   domain.Message{Subject: "件名", Text: "本文", URL: "http://localhost:5173/x"},
 	}
 	for i, e := range emails {
-		req.Recipients = append(req.Recipients, domain.Recipient{Ref: string(rune('a' + i)), Email: e})
+		req.Recipients = append(req.Recipients, domain.Recipient{Ref: fmt.Sprintf("r%d", i), Email: e})
 	}
 	id, _ := domain.NewDeliveryID(t0, nil)
 	return usecase.NewDelivery{
@@ -238,4 +239,17 @@ func count(t *testing.T, db *sql.DB, query string, args ...any) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func TestOpaqueValuesAreCaseSensitive(t *testing.T) {
+	s := openTestDB(t)
+	d := newDelivery("key-00000020", "a@example.invalid", "b@example.invalid")
+	d.Request.Recipients[0].Ref = "Member_1"
+	d.Request.Recipients[1].Ref = "member_1"
+	mustCreate(t, s, d)
+	mustCreate(t, s, newDelivery("KEY-00000020", "a@example.invalid"))
+
+	if _, err := s.FindByDedupeKey(context.Background(), "key-00000020"); err != nil {
+		t.Fatalf("dedupe keys differing only in case must be distinct: %v", err)
+	}
 }
