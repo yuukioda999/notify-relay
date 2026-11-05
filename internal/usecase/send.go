@@ -35,6 +35,8 @@ type SendQueue interface {
 	Claim(ctx context.Context, now time.Time, limit int) ([]Job, error)
 	// Record stores the outcome. Reaching a final status deletes the address (AC-R001-15).
 	Record(ctx context.Context, recipientID int64, o Outcome, now time.Time) error
+	// Release returns claimed recipients that were not sent to "pending".
+	Release(ctx context.Context, recipientIDs []int64) error
 	// RequeueInterrupted returns recipients left "sending" by a crash to "pending" (AC-R001-13).
 	RequeueInterrupted(ctx context.Context) (int64, error)
 }
@@ -50,23 +52,36 @@ type Mailer interface {
 	Send(ctx context.Context, m Mail) error
 }
 
+// recordRetryDelays bound how long a finished send waits for the database before giving up.
+var recordRetryDelays = []time.Duration{200 * time.Millisecond, time.Second, 3 * time.Second}
+
 // Sender sends due recipients with a fixed number of workers (AC-R001-08).
 type Sender struct {
 	Queue       SendQueue
 	Mailer      Mailer
 	Concurrency int
 	BatchSize   int
-	Logger      *slog.Logger
-	Now         func() time.Time
+	// DemoMode skips any address outside .invalid right before sending, in addition to the
+	// check at acceptance, so a demo environment can never mail a real person (AC-R001-06).
+	DemoMode bool
+	Logger   *slog.Logger
+	Now      func() time.Time
 }
 
-// SendDue claims one batch and sends it. It returns how many recipients were processed.
+// SendDue claims one batch and sends it. When ctx is canceled no new mail is started: mail
+// already being sent is finished and recorded, and the rest of the batch is released (AC-R001-14).
+// It returns how many recipients were sent or skipped.
 func (s *Sender) SendDue(ctx context.Context) (int, error) {
+	if ctx.Err() != nil {
+		return 0, nil
+	}
 	jobs, err := s.Queue.Claim(ctx, s.now(), s.batchSize())
 	if err != nil || len(jobs) == 0 {
 		return 0, err
 	}
 
+	// Sending and recording must not be cut off halfway by the stop signal.
+	workCtx := context.WithoutCancel(ctx)
 	work := make(chan Job)
 	var wg sync.WaitGroup
 	for range min(s.concurrency(), len(jobs)) {
@@ -74,33 +89,54 @@ func (s *Sender) SendDue(ctx context.Context) (int, error) {
 		go func() {
 			defer wg.Done()
 			for j := range work {
-				s.process(ctx, j)
+				s.process(workCtx, j)
 			}
 		}()
 	}
+
+	started := 0
+dispatch:
 	for _, j := range jobs {
-		work <- j
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case work <- j:
+			started++
+		}
 	}
 	close(work)
 	wg.Wait()
-	return len(jobs), nil
+
+	if rest := jobs[started:]; len(rest) > 0 {
+		ids := make([]int64, len(rest))
+		for i, j := range rest {
+			ids[i] = j.RecipientID
+		}
+		if err := s.Queue.Release(workCtx, ids); err != nil {
+			// They stay "sending" and are requeued on the next start; nothing was sent to them.
+			s.logger().Error("release unsent recipients", "error", err, "count", len(ids))
+		}
+	}
+	return started, nil
 }
 
-// Run sends due recipients until ctx is canceled. Work already claimed is finished first,
-// using a context that is not canceled, so a shutdown does not leave mail half-sent (AC-R001-14).
+// Run sends due recipients until ctx is canceled, then returns once the mail being sent is done.
 func (s *Sender) Run(ctx context.Context, idle time.Duration) {
-	if n, err := s.Queue.RequeueInterrupted(context.WithoutCancel(ctx)); err != nil {
+	if n, err := s.Queue.RequeueInterrupted(ctx); err != nil {
 		s.logger().Error("requeue interrupted recipients", "error", err)
 	} else if n > 0 {
 		s.logger().Warn("requeued recipients interrupted by a previous stop", "count", n)
 	}
 
 	for {
-		n, err := s.SendDue(context.WithoutCancel(ctx))
-		if err != nil {
+		n, err := s.SendDue(ctx)
+		if err != nil && ctx.Err() == nil {
 			s.logger().Error("claim due recipients", "error", err)
 		}
-		if n > 0 && err == nil && ctx.Err() == nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if n > 0 && err == nil {
 			continue
 		}
 		select {
@@ -117,17 +153,27 @@ func (s *Sender) process(ctx context.Context, j Job) {
 	log := s.logger().With("delivery_id", j.DeliveryID, "recipient_id", j.RecipientID, "email_ref", domain.EmailRef(j.Email))
 
 	var o Outcome
-	if j.ExpiresAt != nil && !now.Before(*j.ExpiresAt) {
+	switch {
+	case j.ExpiresAt != nil && !now.Before(*j.ExpiresAt):
 		o = Outcome{Status: domain.StatusSkipped, Code: domain.ErrExpired, Attempts: j.Attempts} // AC-R001-12
-	} else {
+	case s.DemoMode && !domain.IsDemoAddress(j.Email):
+		o = Outcome{Status: domain.StatusSkipped, Attempts: j.Attempts}
+		log.Warn("skipped a non-demo address in demo mode")
+	default:
 		o = outcomeOf(s.Mailer.Send(ctx, Mail{To: j.Email, Message: j.Message}), attempts, now)
 	}
 
-	if err := s.Queue.Record(ctx, j.RecipientID, o, s.now()); err != nil {
-		log.Error("record send result", "error", err)
-		return
+	// The mail may already be out, so the result is worth a few tries: a recipient left
+	// "sending" would be sent again after a restart.
+	var err error
+	for _, delay := range append([]time.Duration{0}, recordRetryDelays...) {
+		time.Sleep(delay)
+		if err = s.Queue.Record(ctx, j.RecipientID, o, s.now()); err == nil {
+			log.Info("send attempt finished", "status", o.Status, "error_code", o.Code, "attempts", o.Attempts)
+			return
+		}
 	}
-	log.Info("send attempt finished", "status", o.Status, "error_code", o.Code, "attempts", o.Attempts)
+	log.Error("record send result", "error", err, "status", o.Status)
 }
 
 // outcomeOf turns a mailer result into the next state (AC-R001-10, AC-R001-11).

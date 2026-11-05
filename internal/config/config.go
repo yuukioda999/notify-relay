@@ -44,6 +44,14 @@ var keyIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 const defaultFooter = "このメールは送信専用です。返信いただいてもお答えできません。"
 
+// publishedLocalKeys are dummy secrets committed for local development (team-ops compose.yaml).
+// Anyone can read them, so they are refused unless ALLOW_LOCAL_SIGNING_KEY=true.
+var publishedLocalKeys = []string{"local-dev-relay-signing-key-0001"}
+
+// plaintextSMTPHosts may be used with SMTP_TLS=none: they are on the same machine or the
+// local compose network, so addresses and login links do not cross a real network in clear.
+var plaintextSMTPHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true, "mailpit": true}
+
 // Load reads Config from the environment, applying defaults for unset values.
 func Load() (Config, error) {
 	cfg := Config{
@@ -92,8 +100,21 @@ func Load() (Config, error) {
 		errs = append(errs, err)
 	}
 	cfg.SigningKeys = keys
+	if os.Getenv("ALLOW_LOCAL_SIGNING_KEY") != "true" {
+		for id, secret := range keys {
+			for _, published := range publishedLocalKeys {
+				if string(secret) == published {
+					errs = append(errs, fmt.Errorf("RELAY_SIGNING_KEYS: key %q is the published local development key; set a real secret", id))
+				}
+			}
+		}
+	}
 	switch cfg.SMTP.TLS {
-	case "none", "starttls", "tls":
+	case "starttls", "tls":
+	case "none":
+		if !plaintextSMTPHosts[getEnv("SMTP_HOST", "localhost")] {
+			errs = append(errs, fmt.Errorf("SMTP_TLS=none is allowed only for a local SMTP server (localhost or mailpit)"))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("SMTP_TLS must be none, starttls or tls"))
 	}

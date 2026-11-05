@@ -62,6 +62,7 @@ func run(logger *slog.Logger) error {
 			Footer:   cfg.SMTP.Footer,
 		},
 		Concurrency: cfg.SendConcurrency,
+		DemoMode:    cfg.DemoMode,
 		Logger:      logger,
 	}
 
@@ -75,6 +76,8 @@ func run(logger *slog.Logger) error {
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	var wg sync.WaitGroup

@@ -23,6 +23,8 @@ import (
 type fakeSMTP struct {
 	ln        net.Listener
 	rcptReply string
+	mailReply string // reply to MAIL FROM; "250 OK" when empty
+	authReply string // reply to AUTH; AUTH is not offered when empty
 	mu        sync.Mutex
 	data      []string
 }
@@ -60,9 +62,20 @@ func (s *fakeSMTP) serve(conn net.Conn) {
 		cmd := strings.ToUpper(strings.TrimSpace(line))
 		switch {
 		case strings.HasPrefix(cmd, "EHLO"), strings.HasPrefix(cmd, "HELO"):
-			reply("250 fake")
+			if s.authReply != "" {
+				reply("250-fake")
+				reply("250 AUTH PLAIN")
+			} else {
+				reply("250 fake")
+			}
+		case strings.HasPrefix(cmd, "AUTH"):
+			reply(s.authReply)
 		case strings.HasPrefix(cmd, "MAIL FROM"):
-			reply("250 OK")
+			if s.mailReply != "" {
+				reply(s.mailReply)
+			} else {
+				reply("250 OK")
+			}
 		case strings.HasPrefix(cmd, "RCPT TO"):
 			reply(s.rcptReply)
 		case cmd == "DATA":
@@ -137,6 +150,34 @@ func TestSendClassifiesReplies(t *testing.T) {
 			}
 			if se.Code != tt.wantCode || se.Temporary != tt.wantTemporary {
 				t.Fatalf("got code=%s temporary=%v, want %s %v", se.Code, se.Temporary, tt.wantCode, tt.wantTemporary)
+			}
+		})
+	}
+}
+
+func TestSendClassifiesByStage(t *testing.T) {
+	tests := []struct {
+		name          string
+		mailReply     string
+		authReply     string
+		username      string
+		wantCode      domain.ErrorCode
+		wantTemporary bool
+	}{
+		{name: "AC-R001-11 550 to MAIL FROM is a rejection of us, not of the address", mailReply: "550 5.7.1 sender not allowed", wantCode: domain.ErrProviderRejected},
+		{name: "AC-R001-10 a failed login is our configuration and is retried", authReply: "535 5.7.8 authentication failed", username: "relay", wantCode: domain.ErrProviderUnavailable, wantTemporary: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := startFakeSMTP(t, "250 OK")
+			srv.mailReply, srv.authReply = tt.mailReply, tt.authReply
+			m := mailerFor(srv.ln.Addr().String())
+			m.Username, m.Password = tt.username, "secret"
+
+			err := m.Send(context.Background(), testMail)
+			var se *domain.SendError
+			if !errors.As(err, &se) || se.Code != tt.wantCode || se.Temporary != tt.wantTemporary {
+				t.Fatalf("Send() = %v, want code %s temporary %v", err, tt.wantCode, tt.wantTemporary)
 			}
 		})
 	}

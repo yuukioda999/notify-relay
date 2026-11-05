@@ -5,8 +5,8 @@ CREATE TABLE deliveries (
     content_hash    CHAR(64)      NOT NULL,
     tenant_ref      VARCHAR(64)   NOT NULL,
     subject         VARCHAR(200)  NOT NULL,
-    body_text       TEXT          NOT NULL,
-    url             VARCHAR(2048) NULL,
+    body_text       TEXT          NULL, -- cleared when the delivery completes (may hold login links)
+    url             VARCHAR(2048) NULL, -- cleared when the delivery completes
     expires_at      DATETIME(6)   NULL,
     traceparent     VARCHAR(55)   NULL,
     recipient_count INT           NOT NULL,
@@ -22,6 +22,7 @@ CREATE TABLE delivery_recipients (
     delivery_id     CHAR(30)     NOT NULL,
     recipient_ref   VARCHAR(64)  CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, -- opaque: case-sensitive
     email           VARCHAR(254) NULL,
+    email_ref       CHAR(12)     NOT NULL, -- SHA-256 prefix kept for investigation (ADR-0003)
     status          VARCHAR(16)  NOT NULL,
     error_code      VARCHAR(32)  NULL,
     attempts        INT          NOT NULL DEFAULT 0,

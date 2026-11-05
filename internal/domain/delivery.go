@@ -24,6 +24,7 @@ const (
 	maxEmailLen       = 254
 	maxSubjectLen     = 200
 	maxTextLen        = 2000
+	maxURLLen         = 2048
 	demoDomainSuffix  = ".invalid"
 	fieldDedupeKey    = "/dedupe_key"
 	fieldTenantRef    = "/tenant_ref"
@@ -104,7 +105,9 @@ func (r Request) Validate(demoMode bool) error {
 	if n := utf8.RuneCountInString(r.Message.Text); n < 1 || n > maxTextLen {
 		add(fieldText, "length must be 1 to 2000")
 	}
-	if r.Message.URL != "" {
+	if len(r.Message.URL) > maxURLLen {
+		add(fieldURL, "must be at most 2048 characters")
+	} else if r.Message.URL != "" {
 		u, err := url.Parse(r.Message.URL)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			add(fieldURL, "must be an absolute http(s) URL")
@@ -128,7 +131,7 @@ func (r Request) Validate(demoMode bool) error {
 			}
 			if !validEmail(rc.Email) {
 				add(fmt.Sprintf(recipientsPattern, i, "email"), "is not a valid address")
-			} else if demoMode && !strings.HasSuffix(strings.ToLower(rc.Email), demoDomainSuffix) {
+			} else if demoMode && !IsDemoAddress(rc.Email) {
 				add(fmt.Sprintf(recipientsPattern, i, "email"), "demo mode accepts only .invalid addresses")
 			}
 		}
@@ -165,8 +168,14 @@ func (r Request) ContentHash() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// EmailRef is the value logs may show instead of an address: the first 12 hex characters
-// of its SHA-256 (CLAUDE.md: never log addresses).
+// IsDemoAddress reports whether the address is in the reserved .invalid domain, the only
+// domain a demo environment may send to (AC-R001-06).
+func IsDemoAddress(email string) bool {
+	return strings.HasSuffix(strings.ToLower(email), demoDomainSuffix)
+}
+
+// EmailRef is the value logs and delivery records keep instead of an address: the first
+// 12 hex characters of its SHA-256 (CLAUDE.md, ADR-0003 "配信記録にはハッシュ値だけを残す").
 func EmailRef(email string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(email)))
 	return hex.EncodeToString(sum[:6])

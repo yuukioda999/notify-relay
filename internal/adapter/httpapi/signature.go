@@ -8,8 +8,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/yuukioda999/notify-relay/internal/domain"
@@ -25,19 +25,37 @@ const (
 	MaxClockSkew = 5 * time.Minute
 )
 
-// Sign returns the X-Relay-Signature value for body sent at ts.
-func Sign(secret []byte, ts int64, body []byte) string {
+var signaturePattern = regexp.MustCompile(`^v1=[0-9a-f]{64}$`)
+
+// Sign returns the X-Relay-Signature value. The method and path are signed together with
+// the body, so a signature for one operation cannot be reused for another.
+func Sign(secret []byte, ts int64, method, path string, body []byte) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(strconv.FormatInt(ts, 10)))
+	mac.Write([]byte("."))
+	mac.Write([]byte(method))
+	mac.Write([]byte("."))
+	mac.Write([]byte(path))
 	mac.Write([]byte("."))
 	mac.Write(body)
 	return signaturePrefix + hex.EncodeToString(mac.Sum(nil))
 }
 
 // requireSignature rejects requests whose signature, key ID or time is wrong, before the
-// handler sees them (AC-R001-02). It also enforces the 2MB body limit (AC-R001-05).
+// handler sees them (AC-R001-02). Headers are checked before the body is read, so an
+// unsigned request cannot make us buffer up to 2MB. It also enforces the body limit (AC-R001-05).
 func requireSignature(keys map[string][]byte, now func() time.Time, next http.Handler) http.Handler {
+	unauthorized := func(w http.ResponseWriter) {
+		// One answer for every reason, so callers cannot probe which part was wrong.
+		writeProblem(w, http.StatusUnauthorized, "Signature is invalid", nil)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secret, ts, ok := checkHeaders(keys, now(), r.Header)
+		if !ok {
+			unauthorized(w)
+			return
+		}
+
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, domain.MaxBodyBytes))
 		if err != nil {
 			var tooLarge *http.MaxBytesError
@@ -49,9 +67,9 @@ func requireSignature(keys map[string][]byte, now func() time.Time, next http.Ha
 			return
 		}
 
-		if !validSignature(keys, now(), r.Header, body) {
-			// One answer for every reason, so callers cannot probe which part was wrong.
-			writeProblem(w, http.StatusUnauthorized, "Signature is invalid", nil)
+		want := Sign(secret, ts, r.Method, r.URL.Path, body)
+		if !hmac.Equal([]byte(r.Header.Get(HeaderSignature)), []byte(want)) {
+			unauthorized(w)
 			return
 		}
 
@@ -60,22 +78,22 @@ func requireSignature(keys map[string][]byte, now func() time.Time, next http.Ha
 	})
 }
 
-func validSignature(keys map[string][]byte, now time.Time, h http.Header, body []byte) bool {
-	secret, ok := keys[h.Get(HeaderKeyID)]
-	if !ok || len(secret) == 0 {
-		return false
+// checkHeaders validates everything that does not need the body.
+func checkHeaders(keys map[string][]byte, now time.Time, h http.Header) (secret []byte, ts int64, ok bool) {
+	secret, found := keys[h.Get(HeaderKeyID)]
+	if !found || len(secret) == 0 {
+		return nil, 0, false
 	}
 	ts, err := strconv.ParseInt(h.Get(HeaderTimestamp), 10, 64)
 	if err != nil {
-		return false
+		return nil, 0, false
 	}
 	skew := now.Sub(time.Unix(ts, 0))
 	if skew > MaxClockSkew || skew < -MaxClockSkew {
-		return false
+		return nil, 0, false
 	}
-	got := h.Get(HeaderSignature)
-	if !strings.HasPrefix(got, signaturePrefix) {
-		return false
+	if !signaturePattern.MatchString(h.Get(HeaderSignature)) {
+		return nil, 0, false
 	}
-	return hmac.Equal([]byte(got), []byte(Sign(secret, ts, body)))
+	return secret, ts, true
 }

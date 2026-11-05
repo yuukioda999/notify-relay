@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: notify-relay API
-  version: 1.0.0-draft.1
+  version: 1.0.0-draft.2
   summary: 配信依頼を受け、メールを並行送信する内部サービス
   description: |
     notify-relay は、業務アプリ(team-ops-api)から配信依頼を受け取り、
@@ -17,7 +17,10 @@ info:
 
     - `X-Relay-Key-Id`: 署名に使った鍵のID(鍵の入れ替えに対応するため)
     - `X-Relay-Timestamp`: 送信時刻(UNIX秒)
-    - `X-Relay-Signature`: `v1=` + hex( HMAC-SHA256( 鍵, "{timestamp}.{リクエスト本文のバイト列}" ) )
+    - `X-Relay-Signature`: `v1=` + hex( HMAC-SHA256( 鍵, "{timestamp}.{メソッド}.{パス}.{リクエスト本文のバイト列}" ) )
+      - メソッドは大文字(例:`POST`)。パスはクエリ文字列を含めない(例:`/v1/deliveries`)
+      - 本文がないリクエスト(GET)では、本文を空のバイト列として計算する
+      - メソッドとパスを含めるのは、ある依頼の署名を別の操作に使い回せないようにするため
 
     受信側は、時刻のずれが5分を超えるリクエストを拒否します(再送攻撃の防止)。
 
@@ -328,6 +331,7 @@ components:
         url:
           type: string
           format: uri
+          maxLength: 2048
           description: 通知を開いたときの遷移先
 
     Recipient:
@@ -520,7 +524,7 @@ components:
 
   responses:
     BadRequest:
-      description: JSON として解釈できない
+      description: JSON として解釈できない(構文の誤り、空の本文、複数の値)
       content:
         application/problem+json:
           schema:
@@ -550,7 +554,7 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
     ValidationFailed:
-      description: 入力値が仕様に合わない
+      description: 入力値が仕様に合わない(未知の項目、型の違い、値の範囲)
       content:
         application/problem+json:
           schema:

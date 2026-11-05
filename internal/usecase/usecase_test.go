@@ -161,10 +161,12 @@ func TestAccept(t *testing.T) {
 
 // fakeQueue is an in-memory SendQueue.
 type fakeQueue struct {
-	mu       sync.Mutex
-	jobs     []Job
-	recorded map[int64]Outcome
-	requeued int
+	mu          sync.Mutex
+	jobs        []Job
+	recorded    map[int64]Outcome
+	released    []int64
+	requeued    int
+	recordFails int // the first recordFails calls to Record fail
 }
 
 func (q *fakeQueue) Claim(_ context.Context, _ time.Time, limit int) ([]Job, error) {
@@ -179,10 +181,21 @@ func (q *fakeQueue) Claim(_ context.Context, _ time.Time, limit int) ([]Job, err
 func (q *fakeQueue) Record(_ context.Context, id int64, o Outcome, _ time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.recordFails > 0 {
+		q.recordFails--
+		return errors.New("database unavailable")
+	}
 	if q.recorded == nil {
 		q.recorded = map[int64]Outcome{}
 	}
 	q.recorded[id] = o
+	return nil
+}
+
+func (q *fakeQueue) Release(_ context.Context, ids []int64) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.released = append(q.released, ids...)
 	return nil
 }
 
@@ -192,15 +205,19 @@ func (q *fakeQueue) RequeueInterrupted(context.Context) (int64, error) {
 }
 
 type fakeMailer struct {
-	mu     sync.Mutex
-	err    error
-	sent   []Mail
-	active int
-	peak   int
-	delay  time.Duration
+	mu      sync.Mutex
+	err     error
+	sent    []Mail
+	active  int
+	peak    int
+	delay   time.Duration
+	onStart func() // called when a send starts
 }
 
 func (m *fakeMailer) Send(_ context.Context, mail Mail) error {
+	if m.onStart != nil {
+		m.onStart()
+	}
 	m.mu.Lock()
 	m.active++
 	m.peak = max(m.peak, m.active)
@@ -221,6 +238,7 @@ func TestSendDueOutcomes(t *testing.T) {
 		name     string
 		job      Job
 		mailErr  error
+		demo     bool
 		want     Outcome
 		wantSent bool
 	}{
@@ -256,12 +274,20 @@ func TestSendDueOutcomes(t *testing.T) {
 			name: "AC-R001-12 a recipient before its expiry is sent", job: Job{RecipientID: 1, Email: "a@example.invalid", ExpiresAt: &future},
 			want: Outcome{Status: domain.StatusDelivered, Attempts: 1}, wantSent: true,
 		},
+		{
+			name: "AC-R001-06 demo mode skips a real address right before sending", demo: true, job: Job{RecipientID: 1, Email: "parent@example.com"},
+			want: Outcome{Status: domain.StatusSkipped, Attempts: 0}, wantSent: false,
+		},
+		{
+			name: "AC-R001-06 demo mode sends to .invalid", demo: true, job: Job{RecipientID: 1, Email: "a@example.invalid"},
+			want: Outcome{Status: domain.StatusDelivered, Attempts: 1}, wantSent: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			q := &fakeQueue{jobs: []Job{tt.job}}
 			m := &fakeMailer{err: tt.mailErr}
-			s := &Sender{Queue: q, Mailer: m, Now: func() time.Time { return fixedNow }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			s := &Sender{Queue: q, Mailer: m, DemoMode: tt.demo, Now: func() time.Time { return fixedNow }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 			n, err := s.SendDue(context.Background())
 			if err != nil || n != 1 {
@@ -308,7 +334,11 @@ func TestSendDueRespectsConcurrency(t *testing.T) {
 	}
 }
 
-func TestRunRequeuesInterruptedWorkAndStopsOnCancel(t *testing.T) {
+func TestRun(t *testing.T) {
+	t.Run("AC-R001-13 interrupted work is requeued at start and Run stops on cancel", testRunRequeuesAndStops)
+}
+
+func testRunRequeuesAndStops(t *testing.T) {
 	q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}}
 	m := &fakeMailer{}
 	s := &Sender{Queue: q, Mailer: m, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
@@ -339,5 +369,69 @@ func TestRunRequeuesInterruptedWorkAndStopsOnCancel(t *testing.T) {
 	}
 	if q.requeued != 1 {
 		t.Fatalf("RequeueInterrupted called %d times, want 1 (AC-R001-13)", q.requeued)
+	}
+}
+
+func TestShutdown(t *testing.T) {
+	t.Run("AC-R001-14 after the stop signal no new mail starts; started mail is recorded and the rest released", func(t *testing.T) {
+		q := &fakeQueue{}
+		for i := range 10 {
+			q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: "a@example.invalid"})
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		var once sync.Once
+		m := &fakeMailer{delay: 20 * time.Millisecond, onStart: func() { once.Do(cancel) }}
+		s := &Sender{Queue: q, Mailer: m, Concurrency: 1, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+		started, err := s.SendDue(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if started < 1 || started > 2 {
+			t.Fatalf("started %d sends after the stop signal, want 1 (or 2 if the next one was already handed over)", started)
+		}
+		if len(q.recorded) != started || len(m.sent) != started {
+			t.Fatalf("recorded %d, sent %d, want %d each", len(q.recorded), len(m.sent), started)
+		}
+		if len(q.released) != 10-started {
+			t.Fatalf("released %d, want %d", len(q.released), 10-started)
+		}
+	})
+
+	t.Run("AC-R001-14 nothing is claimed once stopped", func(t *testing.T) {
+		q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s := &Sender{Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		if n, _ := s.SendDue(ctx); n != 0 || len(q.jobs) != 1 {
+			t.Fatalf("SendDue after stop claimed or sent %d", n)
+		}
+	})
+}
+
+func TestRecordIsRetried(t *testing.T) {
+	saved := recordRetryDelays
+	recordRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { recordRetryDelays = saved })
+
+	tests := []struct {
+		name         string
+		fails        int
+		wantRecorded bool
+	}{
+		{name: "AC-R001-13 a temporary database error does not leave the recipient sending", fails: 2, wantRecorded: true},
+		{name: "AC-R001-13 a lasting database error is given up after 4 tries", fails: 10, wantRecorded: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}, recordFails: tt.fails}
+			s := &Sender{Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if _, err := s.SendDue(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := q.recorded[1]; ok != tt.wantRecorded {
+				t.Fatalf("recorded = %v, want %v", ok, tt.wantRecorded)
+			}
+		})
 	}
 }

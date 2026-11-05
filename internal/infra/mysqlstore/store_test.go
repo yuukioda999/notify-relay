@@ -253,3 +253,88 @@ func TestOpaqueValuesAreCaseSensitive(t *testing.T) {
 		t.Fatalf("dedupe keys differing only in case must be distinct: %v", err)
 	}
 }
+
+func TestRecordConcurrently(t *testing.T) {
+	t.Run("AC-R001-15 recording the last recipients of a delivery at the same time completes it", func(t *testing.T) {
+		s := openTestDB(t)
+		ctx := context.Background()
+		for round := range 10 {
+			d := newDelivery(fmt.Sprintf("key-concurrent-%02d", round), "a@example.invalid", "b@example.invalid", "c@example.invalid")
+			mustCreate(t, s, d)
+			jobs, err := s.Claim(ctx, t0, 10)
+			if err != nil || len(jobs) != 3 {
+				t.Fatalf("Claim = %d jobs, %v", len(jobs), err)
+			}
+			var wg sync.WaitGroup
+			errs := make(chan error, len(jobs))
+			for _, j := range jobs {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					errs <- s.Record(ctx, j.RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+				}()
+			}
+			wg.Wait()
+			close(errs)
+			for err := range errs {
+				if err != nil {
+					t.Fatalf("round %d: Record failed: %v", round, err)
+				}
+			}
+			if n := count(t, s.DB, `SELECT COUNT(*) FROM deliveries WHERE id = ? AND completed_at IS NOT NULL`, string(d.ID)); n != 1 {
+				t.Fatalf("round %d: delivery was not completed", round)
+			}
+		}
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients WHERE status = 'sending'`); n != 0 {
+			t.Fatalf("%d recipients were left sending", n)
+		}
+	})
+}
+
+func TestRecordsKeepOnlyWhatIsNeeded(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("ADR-0003 a hash of the address remains after the address is deleted", func(t *testing.T) {
+		s := openTestDB(t)
+		mustCreate(t, s, newDelivery("key-00000030", "coach@example.invalid"))
+		jobs, _ := s.Claim(ctx, t0, 10)
+		_ = s.Record(ctx, jobs[0].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+
+		var ref string
+		var email sql.NullString
+		if err := s.DB.QueryRowContext(ctx, `SELECT email_ref, email FROM delivery_recipients`).Scan(&ref, &email); err != nil {
+			t.Fatal(err)
+		}
+		if email.Valid || ref != domain.EmailRef("coach@example.invalid") {
+			t.Fatalf("email = %v, email_ref = %q", email, ref)
+		}
+	})
+
+	t.Run("the body and URL, which may hold a login link, are deleted when the delivery completes", func(t *testing.T) {
+		s := openTestDB(t)
+		mustCreate(t, s, newDelivery("key-00000031", "a@example.invalid", "b@example.invalid"))
+		jobs, _ := s.Claim(ctx, t0, 10)
+
+		_ = s.Record(ctx, jobs[0].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM deliveries WHERE body_text IS NOT NULL AND url IS NOT NULL`); n != 1 {
+			t.Fatal("the body was deleted while a recipient is still being sent")
+		}
+		_ = s.Record(ctx, jobs[1].RecipientID, usecase.Outcome{Status: domain.StatusFailed, Code: domain.ErrInvalidAddress, Attempts: 1}, t0)
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM deliveries WHERE body_text IS NULL AND url IS NULL AND completed_at IS NOT NULL`); n != 1 {
+			t.Fatal("the body and URL remain after completion")
+		}
+	})
+
+	t.Run("AC-R001-14 released recipients can be claimed again", func(t *testing.T) {
+		s := openTestDB(t)
+		mustCreate(t, s, newDelivery("key-00000032", "a@example.invalid", "b@example.invalid"))
+		jobs, _ := s.Claim(ctx, t0, 10)
+		if err := s.Release(ctx, []int64{jobs[1].RecipientID}); err != nil {
+			t.Fatal(err)
+		}
+		again, _ := s.Claim(ctx, t0, 10)
+		if len(again) != 1 || again[0].RecipientID != jobs[1].RecipientID {
+			t.Fatalf("Claim after Release = %+v", again)
+		}
+	})
+}

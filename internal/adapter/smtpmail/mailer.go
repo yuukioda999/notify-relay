@@ -69,23 +69,23 @@ func (m *Mailer) Send(ctx context.Context, msg usecase.Mail) error {
 	defer func() { _ = c.Close() }()
 
 	if err := m.handshake(c); err != nil {
-		return classify(err)
+		return classify(stageSession, err)
 	}
 	if err := c.Mail(m.From); err != nil {
-		return classify(err)
+		return classify(stageSender, err)
 	}
 	if err := c.Rcpt(msg.To); err != nil {
-		return classify(err)
+		return classify(stageRecipient, err)
 	}
 	w, err := c.Data()
 	if err != nil {
-		return classify(err)
+		return classify(stageMessage, err)
 	}
 	if _, err := w.Write(data); err != nil {
 		return temporary(err)
 	}
 	if err := w.Close(); err != nil {
-		return classify(err)
+		return classify(stageMessage, err)
 	}
 	_ = c.Quit()
 	return nil
@@ -179,20 +179,31 @@ func (m *Mailer) compose(msg usecase.Mail) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// stage is the step of the SMTP conversation a reply belongs to.
+type stage int
+
+const (
+	stageSession   stage = iota // STARTTLS and AUTH: our own setup
+	stageSender                 // MAIL FROM
+	stageRecipient              // RCPT TO: the only step that judges the address
+	stageMessage                // DATA
+)
+
 // classify maps SMTP replies to retry decisions: 4xx is temporary, 5xx is permanent.
-func classify(err error) error {
+// Only a refusal at RCPT TO means the address is invalid (AC-R001-11). A failure while
+// setting up the session (TLS, authentication) is our configuration, not the recipient's:
+// it is retried so that fixing the settings lets the mail go out.
+func classify(st stage, err error) error {
 	var tp *textproto.Error
-	if !errors.As(err, &tp) {
+	if !errors.As(err, &tp) || st == stageSession {
 		return temporary(err)
 	}
 	switch {
-	case tp.Code == 421 || tp.Code == 450 || tp.Code == 451:
-		return &domain.SendError{Code: domain.ErrProviderUnavailable, Temporary: true, Err: err}
 	case tp.Code == 452:
 		return &domain.SendError{Code: domain.ErrRateLimited, Temporary: true, Err: err}
 	case tp.Code >= 400 && tp.Code < 500:
 		return &domain.SendError{Code: domain.ErrProviderUnavailable, Temporary: true, Err: err}
-	case tp.Code == 550 || tp.Code == 551 || tp.Code == 553 || tp.Code == 501:
+	case st == stageRecipient && (tp.Code == 550 || tp.Code == 551 || tp.Code == 553 || tp.Code == 501):
 		return &domain.SendError{Code: domain.ErrInvalidAddress, Err: err}
 	default:
 		return &domain.SendError{Code: domain.ErrProviderRejected, Err: err}

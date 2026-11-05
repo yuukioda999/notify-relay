@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/yuukioda999/notify-relay/internal/domain"
@@ -30,11 +32,13 @@ type acceptedResponse struct {
 
 func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req domain.Request
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil || dec.More() {
-			writeProblem(w, http.StatusBadRequest, "Request body is not valid JSON for a delivery request", nil)
+		req, fieldErr, ok := decodeRequest(r.Body)
+		if !ok {
+			writeProblem(w, http.StatusBadRequest, "Request body is not valid JSON", nil)
+			return
+		}
+		if fieldErr != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, "Delivery request is invalid", []domain.FieldError{*fieldErr})
 			return
 		}
 
@@ -70,6 +74,38 @@ func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.H
 			RecipientCount: res.RecipientCount,
 			AcceptedAt:     res.AcceptedAt.UTC().Format(time.RFC3339),
 		})
+	}
+}
+
+// decodeRequest separates JSON that cannot be parsed (400) from JSON that breaks the schema,
+// such as unknown fields or wrong types (422 with a pointer), as api/openapi.yaml defines.
+func decodeRequest(body io.Reader) (req domain.Request, fieldErr *domain.FieldError, ok bool) {
+	raw, err := io.ReadAll(body)
+	if err != nil || !json.Valid(raw) {
+		return req, nil, false
+	}
+	var probe any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return req, nil, false
+	}
+	if _, isObject := probe.(map[string]any); !isObject {
+		return req, &domain.FieldError{Pointer: "", Message: "must be a JSON object"}, true
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	err = dec.Decode(&req)
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		return req, nil, true
+	case errors.As(err, &typeErr):
+		return req, &domain.FieldError{Pointer: "/" + strings.ReplaceAll(typeErr.Field, ".", "/"), Message: "has the wrong type"}, true
+	case strings.HasPrefix(err.Error(), "json: unknown field"):
+		// The field name is not echoed: request values are never written back.
+		return req, &domain.FieldError{Pointer: "", Message: "contains a field that is not in the contract"}, true
+	default:
+		return req, &domain.FieldError{Pointer: "", Message: "does not match the contract"}, true
 	}
 }
 

@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	mysqlDuplicateEntry = 1062
-	insertChunk         = 500
+	mysqlDuplicateEntry  = 1062
+	mysqlDeadlock        = 1213
+	mysqlLockWaitTimeout = 1205
+	insertChunk          = 500
 )
 
 // Store implements usecase.DeliveryStore and usecase.SendQueue.
@@ -82,12 +84,12 @@ func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) (err error) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)*6)
 		for i, rc := range chunk {
-			placeholders[i] = "(?, ?, ?, ?, ?, ?)"
-			args = append(args, string(d.ID), rc.Ref, rc.Email, string(domain.StatusPending), d.AcceptedAt, d.AcceptedAt)
+			placeholders[i] = "(?, ?, ?, ?, ?, ?, ?)"
+			args = append(args, string(d.ID), rc.Ref, rc.Email, domain.EmailRef(rc.Email), string(domain.StatusPending), d.AcceptedAt, d.AcceptedAt)
 		}
 		//nolint:gosec // G202: only "(?, ?, ...)" placeholder groups are concatenated; values are bound
 		_, err = tx.ExecContext(ctx, `INSERT INTO delivery_recipients
-			(delivery_id, recipient_ref, email, status, next_attempt_at, updated_at) VALUES `+strings.Join(placeholders, ","), args...)
+			(delivery_id, recipient_ref, email, email_ref, status, next_attempt_at, updated_at) VALUES `+strings.Join(placeholders, ","), args...)
 		if err != nil {
 			return err
 		}
@@ -161,13 +163,14 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 	for rows.Next() {
 		var j usecase.Job
 		var deliveryID string
-		var url sql.NullString
+		var url, text sql.NullString
 		var expires sql.NullTime
-		if err = rows.Scan(&j.RecipientID, &deliveryID, &j.Email, &j.Attempts, &j.Message.Subject, &j.Message.Text, &url, &expires); err != nil {
+		if err = rows.Scan(&j.RecipientID, &deliveryID, &j.Email, &j.Attempts, &j.Message.Subject, &text, &url, &expires); err != nil {
 			return nil, err
 		}
 		j.DeliveryID = domain.DeliveryID(deliveryID)
 		j.Message.URL = url.String
+		j.Message.Text = text.String
 		if expires.Valid {
 			t := expires.Time
 			j.ExpiresAt = &t
@@ -182,7 +185,24 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 
 // Record stores the outcome of an attempt. A final status deletes the address (AC-R001-15),
 // and the delivery is marked complete once no recipient is left to send.
-func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome, now time.Time) (err error) {
+//
+// The delivery row is locked first, so recipients of the same delivery are recorded one at a
+// time. Without it, two transactions recording the last two recipients wait for each other
+// (deadlock) and both roll back after the mail was sent. A deadlock that still happens is retried.
+func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome, now time.Time) error {
+	var err error
+	for attempt := range 3 {
+		err = s.record(ctx, recipientID, o, now)
+		var me *mysql.MySQLError
+		if !errors.As(err, &me) || (me.Number != mysqlDeadlock && me.Number != mysqlLockWaitTimeout) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+	}
+	return err
+}
+
+func (s *Store) record(ctx context.Context, recipientID int64, o usecase.Outcome, now time.Time) (err error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -192,6 +212,15 @@ func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome
 			_ = tx.Rollback()
 		}
 	}()
+
+	var deliveryID string
+	if err = tx.QueryRowContext(ctx, `SELECT delivery_id FROM delivery_recipients WHERE id = ?`, recipientID).Scan(&deliveryID); err != nil {
+		return fmt.Errorf("recipient %d: %w", recipientID, err)
+	}
+	var locked string
+	if err = tx.QueryRowContext(ctx, `SELECT id FROM deliveries WHERE id = ? FOR UPDATE`, deliveryID).Scan(&locked); err != nil {
+		return err
+	}
 
 	final := o.Status.IsFinal()
 	next := now
@@ -211,11 +240,8 @@ func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome
 	}
 
 	if final {
-		var deliveryID string
-		if err = tx.QueryRowContext(ctx, `SELECT delivery_id FROM delivery_recipients WHERE id = ?`, recipientID).Scan(&deliveryID); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE deliveries SET completed_at = ?
+		// The body and URL can hold a login link; they are not needed once nothing is left to send.
+		_, err = tx.ExecContext(ctx, `UPDATE deliveries SET completed_at = ?, body_text = NULL, url = NULL
 			WHERE id = ? AND completed_at IS NULL
 			  AND NOT EXISTS (
 			    SELECT 1 FROM delivery_recipients
@@ -228,8 +254,23 @@ func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome
 	return tx.Commit()
 }
 
+// Release returns claimed recipients that were not sent (for example at shutdown) to "pending".
+func (s *Store) Release(ctx context.Context, recipientIDs []int64) error {
+	if len(recipientIDs) == 0 {
+		return nil
+	}
+	args := []any{string(domain.StatusPending), string(domain.StatusSending)}
+	for _, id := range recipientIDs {
+		args = append(args, id)
+	}
+	in := strings.TrimSuffix(strings.Repeat("?,", len(recipientIDs)), ",")
+	//nolint:gosec // G202: only "?" placeholders are concatenated; the IDs are bound
+	_, err := s.DB.ExecContext(ctx, `UPDATE delivery_recipients SET status = ? WHERE status = ? AND id IN (`+in+`)`, args...)
+	return err
+}
+
 // RequeueInterrupted returns recipients left "sending" to "pending". It must run before the
-// sender starts and assumes one notify-relay process (AC-R001-13).
+// sender starts and assumes one notify-relay process (AC-R001-13, ADR-0002).
 func (s *Store) RequeueInterrupted(ctx context.Context) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `UPDATE delivery_recipients SET status = ? WHERE status = ?`,
 		string(domain.StatusPending), string(domain.StatusSending))

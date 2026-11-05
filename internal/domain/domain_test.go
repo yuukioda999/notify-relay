@@ -40,6 +40,7 @@ func TestValidate(t *testing.T) {
 		{name: "subject with a line break (header injection)", mutate: func(r *Request) { r.Message.Subject = "a\r\nBcc: x@example.invalid" }, wantField: "/message/subject"},
 		{name: "text too long", mutate: func(r *Request) { r.Message.Text = strings.Repeat("あ", 2001) }, wantField: "/message/text"},
 		{name: "relative url", mutate: func(r *Request) { r.Message.URL = "/login" }, wantField: "/message/url"},
+		{name: "AC-R001-05 url longer than 2048 characters", mutate: func(r *Request) { r.Message.URL = "https://example.invalid/" + strings.Repeat("a", 2030) }, wantField: "/message/url"},
 		{name: "javascript url", mutate: func(r *Request) { r.Message.URL = "javascript:alert(1)" }, wantField: "/message/url"},
 		{name: "no recipients", mutate: func(r *Request) { r.Recipients = nil }, wantField: "/recipients"},
 		{name: "AC-R001-05 more than 1000 recipients", mutate: func(r *Request) { r.Recipients = tooMany }, wantField: "/recipients"},
