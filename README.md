@@ -28,13 +28,15 @@
 |---|---|---|---|
 | `DB_DSN` | ○ | | 専用スキーマへの接続先(例:`notify_relay:pass@tcp(mysql:3306)/notify_relay`) |
 | `RELAY_SIGNING_KEYS` | ○ | | 署名の鍵。`鍵ID:base64の鍵` をカンマ区切りで複数指定でき、鍵の入れ替えに使う。鍵は32バイト以上 |
-| `ALLOW_LOCAL_SIGNING_KEY` | | `false` | `true` のときだけ、team-ops に公開しているローカル開発用の鍵を受け付ける |
+| `EMAIL_REF_KEY` | ○ | | ログと配信記録に、メールアドレスの代わりに残す値(email_ref)の鍵。base64で32バイト以上。鍵を使うので、ログを読める人が候補のアドレスと照合できない |
+| `ALLOW_LOCAL_SIGNING_KEY` | | `false` | `true` のときだけ、team-ops に公開しているローカル開発用の鍵(署名の鍵と email_ref の鍵)を受け付ける |
 | `SMTP_HOST` / `SMTP_PORT` | | `localhost` / `587` | 送信先のSMTPサーバー |
 | `SMTP_TLS` | | `starttls` | `none`、`starttls`、`tls`。`none` は接続先が localhost か mailpit のときだけ使える |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | | | SMTP認証(指定したときだけ使う) |
 | `SMTP_FROM` / `SMTP_FROM_NAME` | | `no-reply@team-ops.invalid` / `チーム運営` | 差出人 |
 | `SEND_CONCURRENCY` | | `50` | 同時に送る数 |
-| `DEMO_MODE` | | `false` | `true` のとき `.invalid` ドメイン以外の宛先を拒否する |
+| `RECIPIENTS_INVALID_ONLY` | | `false` | `true` のとき `.invalid` ドメイン以外の宛先を拒否する(team-ops-api と同じ名前) |
+| `DEMO_MODE` | | `false` | `RECIPIENTS_INVALID_ONLY` の別名。どちらかが `true` なら宛先を制限する |
 | `PORT` / `SHUTDOWN_TIMEOUT` | | `8080` / `30s` | 待ち受けポートと、停止時に送信の完了を待つ時間 |
 
 ## 運用上の前提
