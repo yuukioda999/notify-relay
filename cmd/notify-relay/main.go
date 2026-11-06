@@ -62,7 +62,7 @@ func run(logger *slog.Logger) error {
 			Footer:   cfg.SMTP.Footer,
 		},
 		Concurrency: cfg.SendConcurrency,
-		DemoMode:    cfg.DemoMode,
+		DemoMode:    cfg.InvalidRecipientsOnly,
 		RefKey:      cfg.EmailRefKey,
 		Logger:      logger,
 	}
@@ -71,7 +71,7 @@ func run(logger *slog.Logger) error {
 		Addr: cfg.Addr,
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Checks:   map[string]httpapi.ReadinessCheck{"database": db.PingContext},
-			Acceptor: &usecase.Acceptor{Store: store, DemoMode: cfg.DemoMode},
+			Acceptor: &usecase.Acceptor{Store: store, DemoMode: cfg.InvalidRecipientsOnly},
 			Keys:     cfg.SigningKeys,
 			Logger:   logger,
 		}),
@@ -90,7 +90,7 @@ func run(logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("notify-relay listening", "addr", cfg.Addr, "demo_mode", cfg.DemoMode)
+		logger.Info("notify-relay listening", "addr", cfg.Addr, "invalid_recipients_only", cfg.InvalidRecipientsOnly)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

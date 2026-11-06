@@ -206,33 +206,47 @@ func TestStatusIsFinal(t *testing.T) {
 func TestEmailRefKey(t *testing.T) {
 	key := EmailRefKey(strings.Repeat("k", 32))
 	other := EmailRefKey(strings.Repeat("o", 32))
-	ref := key.Ref("coach@example.invalid")
+	const address = "coach@example.invalid"
+	plain := sha256.Sum256([]byte(address))
 
-	t.Run("ADR-0003 the value does not reveal the address", func(t *testing.T) {
-		if len(ref) != 12 || strings.Contains(ref, "coach") {
-			t.Fatalf("Ref = %q", ref)
-		}
-	})
-	t.Run("ADR-0003 case does not matter", func(t *testing.T) {
-		if key.Ref("Coach@Example.invalid") != ref {
-			t.Fatal("Ref should ignore case")
-		}
-	})
-	t.Run("ADR-0003 a guess cannot be checked without the key", func(t *testing.T) {
-		sum := sha256.Sum256([]byte("coach@example.invalid"))
-		if ref == hex.EncodeToString(sum[:6]) {
-			t.Fatal("Ref must not be a plain SHA-256 of the address")
-		}
-		if other.Ref("coach@example.invalid") == ref {
-			t.Fatal("a different key must give a different value")
-		}
-	})
-	t.Run("a missing key is a wiring mistake", func(t *testing.T) {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("Ref with no key should panic")
+	tests := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{"AC-R001-26 the value is 12 hex characters and does not reveal the address", func(t *testing.T) {
+			if ref := key.Ref(address); len(ref) != 12 || strings.Contains(ref, "coach") {
+				t.Fatalf("Ref = %q", ref)
 			}
-		}()
-		EmailRefKey(nil).Ref("coach@example.invalid")
-	})
+		}},
+		{"AC-R001-26 case does not matter", func(t *testing.T) {
+			if key.Ref("Coach@Example.invalid") != key.Ref(address) {
+				t.Fatal("Ref should ignore case")
+			}
+		}},
+		{"AC-R001-26 the value is not a plain SHA-256 that anyone could recompute", func(t *testing.T) {
+			if key.Ref(address) == hex.EncodeToString(plain[:6]) {
+				t.Fatal("Ref must be keyed")
+			}
+		}},
+		{"AC-R001-26 a different key gives a different value", func(t *testing.T) {
+			if other.Ref(address) == key.Ref(address) {
+				t.Fatal("the key must change the value")
+			}
+		}},
+		{"AC-R001-26 a missing or short key is a wiring mistake and panics", func(t *testing.T) {
+			for _, k := range []EmailRefKey{nil, EmailRefKey(strings.Repeat("k", MinEmailRefKeyBytes-1))} {
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Fatalf("Ref with a %d-byte key should panic", len(k))
+						}
+					}()
+					k.Ref(address)
+				}()
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
 }

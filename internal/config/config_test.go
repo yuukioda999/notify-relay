@@ -61,7 +61,7 @@ func TestLoad(t *testing.T) {
 			}),
 			want: func() Config {
 				c := defaults
-				c.Addr, c.ShutdownTimeout, c.DemoMode, c.SendConcurrency = ":9090", 5*time.Second, true, 10
+				c.Addr, c.ShutdownTimeout, c.InvalidRecipientsOnly, c.SendConcurrency = ":9090", 5*time.Second, true, 10
 				c.SMTP.Addr, c.SMTP.TLS = "mailpit:1025", "none"
 				c.SigningKeys = map[string][]byte{"k-old": []byte(secret32), "k-new": []byte(secret32)}
 				return c
@@ -69,6 +69,17 @@ func TestLoad(t *testing.T) {
 		},
 		{name: "invalid timeout", env: with(map[string]string{"SHUTDOWN_TIMEOUT": "soon"}), wantErr: "SHUTDOWN_TIMEOUT"},
 		{name: "invalid demo flag", env: with(map[string]string{"DEMO_MODE": "maybe"}), wantErr: "DEMO_MODE"},
+		{name: "invalid recipients flag", env: with(map[string]string{"RECIPIENTS_INVALID_ONLY": "maybe"}), wantErr: "RECIPIENTS_INVALID_ONLY"},
+		{
+			name: "AC-R001-06 RECIPIENTS_INVALID_ONLY alone limits recipients",
+			env:  with(map[string]string{"RECIPIENTS_INVALID_ONLY": "true"}),
+			want: func() Config { c := defaults; c.InvalidRecipientsOnly = true; return c },
+		},
+		{
+			name: "AC-R001-06 either name being true limits recipients",
+			env:  with(map[string]string{"RECIPIENTS_INVALID_ONLY": "false", "DEMO_MODE": "true"}),
+			want: func() Config { c := defaults; c.InvalidRecipientsOnly = true; return c },
+		},
 		{name: "missing DSN", env: map[string]string{"RELAY_SIGNING_KEYS": required["RELAY_SIGNING_KEYS"]}, wantErr: "DB_DSN"},
 		{name: "missing signing keys", env: map[string]string{"DB_DSN": required["DB_DSN"]}, wantErr: "RELAY_SIGNING_KEYS"},
 		{name: "short signing secret", env: with(map[string]string{"RELAY_SIGNING_KEYS": "k1:" + base64.StdEncoding.EncodeToString([]byte("short"))}), wantErr: "at least 32 bytes"},
@@ -77,9 +88,9 @@ func TestLoad(t *testing.T) {
 		{name: "unknown TLS mode", env: with(map[string]string{"SMTP_TLS": "maybe"}), wantErr: "SMTP_TLS"},
 		{name: "zero concurrency", env: with(map[string]string{"SEND_CONCURRENCY": "0"}), wantErr: "SEND_CONCURRENCY"},
 		{name: "plain SMTP to a remote server is refused", env: with(map[string]string{"SMTP_HOST": "smtp.example.com", "SMTP_TLS": "none"}), wantErr: "SMTP_TLS=none"},
-		{name: "ADR-0003 missing email ref key", env: map[string]string{"DB_DSN": required["DB_DSN"], "RELAY_SIGNING_KEYS": required["RELAY_SIGNING_KEYS"]}, wantErr: "EMAIL_REF_KEY is required"},
-		{name: "ADR-0003 short email ref key", env: with(map[string]string{"EMAIL_REF_KEY": base64.StdEncoding.EncodeToString([]byte("short"))}), wantErr: "EMAIL_REF_KEY must be base64"},
-		{name: "ADR-0003 the published local email ref key is refused by default", env: with(map[string]string{"EMAIL_REF_KEY": localRef}), wantErr: "EMAIL_REF_KEY is the published local development key"},
+		{name: "AC-R001-26 missing email ref key", env: map[string]string{"DB_DSN": required["DB_DSN"], "RELAY_SIGNING_KEYS": required["RELAY_SIGNING_KEYS"]}, wantErr: "EMAIL_REF_KEY is required"},
+		{name: "AC-R001-26 short email ref key", env: with(map[string]string{"EMAIL_REF_KEY": base64.StdEncoding.EncodeToString([]byte("short"))}), wantErr: "EMAIL_REF_KEY must be base64"},
+		{name: "AC-R001-26 the published local email ref key is refused by default", env: with(map[string]string{"EMAIL_REF_KEY": localRef}), wantErr: "EMAIL_REF_KEY is the published local development key"},
 		{name: "the published local key is refused by default", env: with(map[string]string{"RELAY_SIGNING_KEYS": "local:" + localKey}), wantErr: "published local development key"},
 		{
 			name: "the published local key is allowed when explicitly enabled",
@@ -93,7 +104,7 @@ func TestLoad(t *testing.T) {
 		},
 	}
 
-	keys := []string{"PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "DB_DSN", "RELAY_SIGNING_KEYS", "EMAIL_REF_KEY", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
+	keys := []string{"PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "RECIPIENTS_INVALID_ONLY", "DB_DSN", "RELAY_SIGNING_KEYS", "EMAIL_REF_KEY", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "SMTP_FROM_NAME", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_TLS", "MAIL_FOOTER"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
