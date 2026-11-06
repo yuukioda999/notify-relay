@@ -113,7 +113,23 @@ func (s *Store) FindByDedupeKey(ctx context.Context, key string) (usecase.Accept
 }
 
 // Claim locks due recipients, skipping rows another sender holds, and marks them "sending".
+//
+// Concurrent claims can still deadlock in MySQL (SKIP LOCKED skips locked rows, but the index
+// locks taken by the UPDATE can cross). The claim is then rolled back before anything is sent,
+// so it is simply run again (AC-R001-08).
 func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []usecase.Job, err error) {
+	err = retryOnLockConflict(func() error {
+		var claimErr error
+		jobs, claimErr = s.claim(ctx, now, limit)
+		return claimErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []usecase.Job, err error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -192,16 +208,30 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 // time. Without it, two transactions recording the last two recipients wait for each other
 // (deadlock) and both roll back after the mail was sent. A deadlock that still happens is retried.
 func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome, now time.Time) error {
+	return retryOnLockConflict(func() error { return s.record(ctx, recipientID, o, now) })
+}
+
+// lockConflictAttempts is how many times a transaction that lost a lock conflict is run.
+const lockConflictAttempts = 3
+
+// retryOnLockConflict runs fn again when MySQL rolled it back for a deadlock or a lock wait
+// timeout. Both roll back the whole transaction, so running it again is safe.
+func retryOnLockConflict(fn func() error) error {
 	var err error
-	for attempt := range 3 {
-		err = s.record(ctx, recipientID, o, now)
-		var me *mysql.MySQLError
-		if !errors.As(err, &me) || (me.Number != mysqlDeadlock && me.Number != mysqlLockWaitTimeout) {
+	for attempt := range lockConflictAttempts {
+		if err = fn(); !isLockConflict(err) {
 			return err
 		}
-		time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		if attempt < lockConflictAttempts-1 {
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
 	}
 	return err
+}
+
+func isLockConflict(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && (me.Number == mysqlDeadlock || me.Number == mysqlLockWaitTimeout)
 }
 
 func (s *Store) record(ctx context.Context, recipientID int64, o usecase.Outcome, now time.Time) (err error) {
