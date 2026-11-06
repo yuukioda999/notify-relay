@@ -2,6 +2,8 @@ package domain
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"regexp"
 	"strings"
@@ -201,12 +203,36 @@ func TestStatusIsFinal(t *testing.T) {
 	}
 }
 
-func TestEmailRefDoesNotRevealTheAddress(t *testing.T) {
-	ref := EmailRef("coach@example.invalid")
-	if len(ref) != 12 || strings.Contains(ref, "coach") {
-		t.Fatalf("EmailRef = %q", ref)
-	}
-	if EmailRef("Coach@Example.invalid") != ref {
-		t.Fatal("EmailRef should ignore case")
-	}
+func TestEmailRefKey(t *testing.T) {
+	key := EmailRefKey(strings.Repeat("k", 32))
+	other := EmailRefKey(strings.Repeat("o", 32))
+	ref := key.Ref("coach@example.invalid")
+
+	t.Run("ADR-0003 the value does not reveal the address", func(t *testing.T) {
+		if len(ref) != 12 || strings.Contains(ref, "coach") {
+			t.Fatalf("Ref = %q", ref)
+		}
+	})
+	t.Run("ADR-0003 case does not matter", func(t *testing.T) {
+		if key.Ref("Coach@Example.invalid") != ref {
+			t.Fatal("Ref should ignore case")
+		}
+	})
+	t.Run("ADR-0003 a guess cannot be checked without the key", func(t *testing.T) {
+		sum := sha256.Sum256([]byte("coach@example.invalid"))
+		if ref == hex.EncodeToString(sum[:6]) {
+			t.Fatal("Ref must not be a plain SHA-256 of the address")
+		}
+		if other.Ref("coach@example.invalid") == ref {
+			t.Fatal("a different key must give a different value")
+		}
+	})
+	t.Run("a missing key is a wiring mistake", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Ref with no key should panic")
+			}
+		}()
+		EmailRefKey(nil).Ref("coach@example.invalid")
+	})
 }

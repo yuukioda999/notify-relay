@@ -12,12 +12,15 @@ var (
 	secret32 = strings.Repeat("s", 32)
 	key32    = base64.StdEncoding.EncodeToString([]byte(secret32))
 	localKey = base64.StdEncoding.EncodeToString([]byte("local-dev-relay-signing-key-0001"))
+	refKey32 = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("r", 32)))
+	localRef = base64.StdEncoding.EncodeToString([]byte("local-dev-relay-email-ref-key-001"))
 )
 
 func TestLoad(t *testing.T) {
 	required := map[string]string{
 		"DB_DSN":             "u:p@tcp(db:3306)/notify_relay",
 		"RELAY_SIGNING_KEYS": "k2026-11:" + key32,
+		"EMAIL_REF_KEY":      refKey32,
 	}
 	with := func(extra map[string]string) map[string]string {
 		m := map[string]string{}
@@ -34,6 +37,7 @@ func TestLoad(t *testing.T) {
 		ShutdownTimeout: 30 * time.Second,
 		DatabaseDSN:     "u:p@tcp(db:3306)/notify_relay",
 		SigningKeys:     map[string][]byte{"k2026-11": []byte(secret32)},
+		EmailRefKey:     []byte(strings.Repeat("r", 32)),
 		SendConcurrency: 50,
 		SMTP: SMTP{
 			Addr: "localhost:587", From: "no-reply@team-ops.invalid", FromName: "チーム運営",
@@ -73,19 +77,23 @@ func TestLoad(t *testing.T) {
 		{name: "unknown TLS mode", env: with(map[string]string{"SMTP_TLS": "maybe"}), wantErr: "SMTP_TLS"},
 		{name: "zero concurrency", env: with(map[string]string{"SEND_CONCURRENCY": "0"}), wantErr: "SEND_CONCURRENCY"},
 		{name: "plain SMTP to a remote server is refused", env: with(map[string]string{"SMTP_HOST": "smtp.example.com", "SMTP_TLS": "none"}), wantErr: "SMTP_TLS=none"},
+		{name: "ADR-0003 missing email ref key", env: map[string]string{"DB_DSN": required["DB_DSN"], "RELAY_SIGNING_KEYS": required["RELAY_SIGNING_KEYS"]}, wantErr: "EMAIL_REF_KEY is required"},
+		{name: "ADR-0003 short email ref key", env: with(map[string]string{"EMAIL_REF_KEY": base64.StdEncoding.EncodeToString([]byte("short"))}), wantErr: "EMAIL_REF_KEY must be base64"},
+		{name: "ADR-0003 the published local email ref key is refused by default", env: with(map[string]string{"EMAIL_REF_KEY": localRef}), wantErr: "EMAIL_REF_KEY is the published local development key"},
 		{name: "the published local key is refused by default", env: with(map[string]string{"RELAY_SIGNING_KEYS": "local:" + localKey}), wantErr: "published local development key"},
 		{
 			name: "the published local key is allowed when explicitly enabled",
-			env:  with(map[string]string{"RELAY_SIGNING_KEYS": "local:" + localKey, "ALLOW_LOCAL_SIGNING_KEY": "true"}),
+			env:  with(map[string]string{"RELAY_SIGNING_KEYS": "local:" + localKey, "EMAIL_REF_KEY": localRef, "ALLOW_LOCAL_SIGNING_KEY": "true"}),
 			want: func() Config {
 				c := defaults
 				c.SigningKeys = map[string][]byte{"local": []byte("local-dev-relay-signing-key-0001")}
+				c.EmailRefKey = []byte("local-dev-relay-email-ref-key-001")
 				return c
 			},
 		},
 	}
 
-	keys := []string{"PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "DB_DSN", "RELAY_SIGNING_KEYS", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
+	keys := []string{"PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "DB_DSN", "RELAY_SIGNING_KEYS", "EMAIL_REF_KEY", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "SMTP_FROM_NAME", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_TLS", "MAIL_FOOTER"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

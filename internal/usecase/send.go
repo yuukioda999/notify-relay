@@ -64,8 +64,10 @@ type Sender struct {
 	// DemoMode skips any address outside .invalid right before sending, in addition to the
 	// check at acceptance, so a demo environment can never mail a real person (AC-R001-06).
 	DemoMode bool
-	Logger   *slog.Logger
-	Now      func() time.Time
+	// RefKey makes the email_ref written to the logs instead of the address (ADR-0003).
+	RefKey domain.EmailRefKey
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 // SendDue claims one batch and sends it. When ctx is canceled no new mail is started: mail
@@ -150,7 +152,7 @@ func (s *Sender) Run(ctx context.Context, idle time.Duration) {
 func (s *Sender) process(ctx context.Context, j Job) {
 	now := s.now()
 	attempts := j.Attempts + 1
-	log := s.logger().With("delivery_id", j.DeliveryID, "recipient_id", j.RecipientID, "email_ref", domain.EmailRef(j.Email))
+	log := s.logger().With("delivery_id", j.DeliveryID, "recipient_id", j.RecipientID, "email_ref", s.RefKey.Ref(j.Email))
 
 	var o Outcome
 	switch {

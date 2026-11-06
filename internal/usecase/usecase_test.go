@@ -22,6 +22,8 @@ type memStore struct {
 	created    []NewDelivery
 }
 
+var testRefKey = domain.EmailRefKey("test-email-ref-key-0000000000001")
+
 func newMemStore() *memStore { return &memStore{byKey: map[string]Accepted{}} }
 
 func (m *memStore) Create(_ context.Context, d NewDelivery) error {
@@ -287,7 +289,7 @@ func TestSendDueOutcomes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			q := &fakeQueue{jobs: []Job{tt.job}}
 			m := &fakeMailer{err: tt.mailErr}
-			s := &Sender{Queue: q, Mailer: m, DemoMode: tt.demo, Now: func() time.Time { return fixedNow }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, DemoMode: tt.demo, Now: func() time.Time { return fixedNow }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 			n, err := s.SendDue(context.Background())
 			if err != nil || n != 1 {
@@ -319,7 +321,7 @@ func TestSendDueRespectsConcurrency(t *testing.T) {
 				q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: "a@example.invalid"})
 			}
 			m := &fakeMailer{delay: 5 * time.Millisecond}
-			s := &Sender{Queue: q, Mailer: m, Concurrency: tt.concurrency, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Concurrency: tt.concurrency, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 			if _, err := s.SendDue(context.Background()); err != nil {
 				t.Fatal(err)
@@ -341,7 +343,7 @@ func TestRun(t *testing.T) {
 func testRunRequeuesAndStops(t *testing.T) {
 	q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}}
 	m := &fakeMailer{}
-	s := &Sender{Queue: q, Mailer: m, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -381,7 +383,7 @@ func TestShutdown(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var once sync.Once
 		m := &fakeMailer{delay: 20 * time.Millisecond, onStart: func() { once.Do(cancel) }}
-		s := &Sender{Queue: q, Mailer: m, Concurrency: 1, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Concurrency: 1, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 		started, err := s.SendDue(ctx)
 		if err != nil {
@@ -402,7 +404,7 @@ func TestShutdown(t *testing.T) {
 		q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		s := &Sender{Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		s := &Sender{RefKey: testRefKey, Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 		if n, _ := s.SendDue(ctx); n != 0 || len(q.jobs) != 1 {
 			t.Fatalf("SendDue after stop claimed or sent %d", n)
 		}
@@ -425,7 +427,7 @@ func TestRecordIsRetried(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}, recordFails: tt.fails}
-			s := &Sender{Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			s := &Sender{RefKey: testRefKey, Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			if _, err := s.SendDue(context.Background()); err != nil {
 				t.Fatal(err)
 			}

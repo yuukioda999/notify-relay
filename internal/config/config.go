@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,8 @@ type Config struct {
 	DatabaseDSN string
 	// SigningKeys maps X-Relay-Key-Id to the shared secret. More than one key allows rotation.
 	SigningKeys map[string][]byte
+	// EmailRefKey keys the email_ref kept in logs and delivery records (ADR-0003).
+	EmailRefKey []byte
 	// SendConcurrency is how many mails are sent at once (AC-R001-08).
 	SendConcurrency int
 	SMTP            SMTP
@@ -46,7 +49,7 @@ const defaultFooter = "このメールは送信専用です。返信いただい
 
 // publishedLocalKeys are dummy secrets committed for local development (team-ops compose.yaml).
 // Anyone can read them, so they are refused unless ALLOW_LOCAL_SIGNING_KEY=true.
-var publishedLocalKeys = []string{"local-dev-relay-signing-key-0001"}
+var publishedLocalKeys = []string{"local-dev-relay-signing-key-0001", "local-dev-relay-email-ref-key-001"}
 
 // plaintextSMTPHosts may be used with SMTP_TLS=none: they are on the same machine or the
 // local compose network, so addresses and login links do not cross a real network in clear.
@@ -109,6 +112,16 @@ func Load() (Config, error) {
 			}
 		}
 	}
+	refKey, err := base64.StdEncoding.DecodeString(os.Getenv("EMAIL_REF_KEY"))
+	switch {
+	case os.Getenv("EMAIL_REF_KEY") == "":
+		errs = append(errs, errors.New("EMAIL_REF_KEY is required"))
+	case err != nil || len(refKey) < 32:
+		errs = append(errs, errors.New("EMAIL_REF_KEY must be base64 of at least 32 bytes"))
+	case os.Getenv("ALLOW_LOCAL_SIGNING_KEY") != "true" && slices.Contains(publishedLocalKeys, string(refKey)):
+		errs = append(errs, errors.New("EMAIL_REF_KEY is the published local development key; set a real secret"))
+	}
+	cfg.EmailRefKey = refKey
 	switch cfg.SMTP.TLS {
 	case "starttls", "tls":
 	case "none":

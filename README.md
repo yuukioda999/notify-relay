@@ -28,7 +28,8 @@
 |---|---|---|---|
 | `DB_DSN` | ○ | | 専用スキーマへの接続先(例:`notify_relay:pass@tcp(mysql:3306)/notify_relay`) |
 | `RELAY_SIGNING_KEYS` | ○ | | 署名の鍵。`鍵ID:base64の鍵` をカンマ区切りで複数指定でき、鍵の入れ替えに使う。鍵は32バイト以上 |
-| `ALLOW_LOCAL_SIGNING_KEY` | | `false` | `true` のときだけ、team-ops に公開しているローカル開発用の鍵を受け付ける |
+| `EMAIL_REF_KEY` | ○ | | ログと配信記録に、メールアドレスの代わりに残す値(email_ref)の鍵。base64で32バイト以上。鍵を使うので、ログを読める人が候補のアドレスと照合できない |
+| `ALLOW_LOCAL_SIGNING_KEY` | | `false` | `true` のときだけ、team-ops に公開しているローカル開発用の鍵(署名の鍵と email_ref の鍵)を受け付ける |
 | `SMTP_HOST` / `SMTP_PORT` | | `localhost` / `587` | 送信先のSMTPサーバー |
 | `SMTP_TLS` | | `starttls` | `none`、`starttls`、`tls`。`none` は接続先が localhost か mailpit のときだけ使える |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | | | SMTP認証(指定したときだけ使う) |

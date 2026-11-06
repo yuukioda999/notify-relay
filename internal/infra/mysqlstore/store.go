@@ -24,6 +24,8 @@ const (
 // Store implements usecase.DeliveryStore and usecase.SendQueue.
 type Store struct {
 	DB *sql.DB
+	// RefKey makes the email_ref kept after the address is deleted (ADR-0003).
+	RefKey domain.EmailRefKey
 }
 
 var (
@@ -85,7 +87,7 @@ func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) (err error) {
 		args := make([]any, 0, len(chunk)*6)
 		for i, rc := range chunk {
 			placeholders[i] = "(?, ?, ?, ?, ?, ?, ?)"
-			args = append(args, string(d.ID), rc.Ref, rc.Email, domain.EmailRef(rc.Email), string(domain.StatusPending), d.AcceptedAt, d.AcceptedAt)
+			args = append(args, string(d.ID), rc.Ref, rc.Email, s.RefKey.Ref(rc.Email), string(domain.StatusPending), d.AcceptedAt, d.AcceptedAt)
 		}
 		//nolint:gosec // G202: only "(?, ?, ...)" placeholder groups are concatenated; values are bound
 		_, err = tx.ExecContext(ctx, `INSERT INTO delivery_recipients

@@ -48,7 +48,7 @@ func run(logger *slog.Logger) error {
 	if err := mysqlstore.Migrate(ctx, db); err != nil {
 		return err
 	}
-	store := &mysqlstore.Store{DB: db}
+	store := &mysqlstore.Store{DB: db, RefKey: cfg.EmailRefKey}
 
 	sender := &usecase.Sender{
 		Queue: store,
@@ -63,6 +63,7 @@ func run(logger *slog.Logger) error {
 		},
 		Concurrency: cfg.SendConcurrency,
 		DemoMode:    cfg.DemoMode,
+		RefKey:      cfg.EmailRefKey,
 		Logger:      logger,
 	}
 
