@@ -28,7 +28,7 @@ func TestHealthEndpoints(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			NewRouter(tt.checks).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			NewRouter(Deps{Checks: tt.checks}).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, tt.path, nil))
 
 			if rec.Code != tt.wantCode {
 				t.Fatalf("status code = %d, want %d", rec.Code, tt.wantCode)
@@ -46,7 +46,7 @@ func TestHealthEndpoints(t *testing.T) {
 
 func TestUnknownMethodIsRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
-	NewRouter(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	NewRouter(Deps{}).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/healthz", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status code = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}

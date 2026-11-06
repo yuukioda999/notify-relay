@@ -4,6 +4,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -16,9 +17,31 @@ type healthResponse struct {
 	Checks map[string]string `json:"checks,omitempty"`
 }
 
-// NewRouter builds the HTTP routes. checks are evaluated by /readyz (AC-R001-23).
-func NewRouter(checks map[string]ReadinessCheck) http.Handler {
+// Deps are what the routes need.
+type Deps struct {
+	// Checks are evaluated by /readyz (AC-R001-23).
+	Checks map[string]ReadinessCheck
+	// Acceptor handles POST /v1/deliveries. The route is not registered when nil.
+	Acceptor DeliveryAcceptor
+	// Keys maps X-Relay-Key-Id to the shared secret used for request signatures.
+	Keys   map[string][]byte
+	Now    func() time.Time
+	Logger *slog.Logger
+}
+
+// NewRouter builds the HTTP routes.
+func NewRouter(d Deps) http.Handler {
 	mux := http.NewServeMux()
+	checks := d.Checks
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
+	if d.Acceptor != nil {
+		mux.Handle("POST /v1/deliveries", requireSignature(d.Keys, d.Now, handleCreateDelivery(d.Acceptor, d.Logger)))
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
