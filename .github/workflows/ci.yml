@@ -11,9 +11,27 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: notify_relay_test
+          MYSQL_USER: notify_relay
+          MYSQL_PASSWORD: notify_relay
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      # The store tests run against this database (they are skipped when it is unset)
+      RELAY_TEST_DSN: notify_relay:notify_relay@tcp(127.0.0.1:3306)/notify_relay_test
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'   # latest 1.26 patch release (security fixes)
           cache: false
@@ -24,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'   # latest 1.26 patch release (security fixes)
           cache: false
@@ -37,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'   # latest 1.26 patch release (security fixes)
           cache: false
