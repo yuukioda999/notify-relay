@@ -12,3 +12,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Actions that are used together (the Docker ones, checkout and setup-go) are tested together
+    groups:
+      actions:
+        patterns: ["*"]
