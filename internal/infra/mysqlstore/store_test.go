@@ -35,10 +35,12 @@ func openTestDB(t *testing.T) *Store {
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return &Store{DB: db}
+	return &Store{DB: db, RefKey: testRefKey}
 }
 
 var t0 = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+var testRefKey = domain.EmailRefKey("test-email-ref-key-0000000000001")
 
 func newDelivery(key string, emails ...string) usecase.NewDelivery {
 	req := domain.Request{
@@ -305,7 +307,7 @@ func TestRecordsKeepOnlyWhatIsNeeded(t *testing.T) {
 		if err := s.DB.QueryRowContext(ctx, `SELECT email_ref, email FROM delivery_recipients`).Scan(&ref, &email); err != nil {
 			t.Fatal(err)
 		}
-		if email.Valid || ref != domain.EmailRef("coach@example.invalid") {
+		if email.Valid || ref != testRefKey.Ref("coach@example.invalid") {
 			t.Fatalf("email = %v, email_ref = %q", email, ref)
 		}
 	})

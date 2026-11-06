@@ -2,6 +2,8 @@ package domain
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"regexp"
 	"strings"
@@ -201,12 +203,50 @@ func TestStatusIsFinal(t *testing.T) {
 	}
 }
 
-func TestEmailRefDoesNotRevealTheAddress(t *testing.T) {
-	ref := EmailRef("coach@example.invalid")
-	if len(ref) != 12 || strings.Contains(ref, "coach") {
-		t.Fatalf("EmailRef = %q", ref)
+func TestEmailRefKey(t *testing.T) {
+	key := EmailRefKey(strings.Repeat("k", 32))
+	other := EmailRefKey(strings.Repeat("o", 32))
+	const address = "coach@example.invalid"
+	plain := sha256.Sum256([]byte(address))
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{"AC-R001-26 the value is 12 hex characters and does not reveal the address", func(t *testing.T) {
+			if ref := key.Ref(address); len(ref) != 12 || strings.Contains(ref, "coach") {
+				t.Fatalf("Ref = %q", ref)
+			}
+		}},
+		{"AC-R001-26 case does not matter", func(t *testing.T) {
+			if key.Ref("Coach@Example.invalid") != key.Ref(address) {
+				t.Fatal("Ref should ignore case")
+			}
+		}},
+		{"AC-R001-26 the value is not a plain SHA-256 that anyone could recompute", func(t *testing.T) {
+			if key.Ref(address) == hex.EncodeToString(plain[:6]) {
+				t.Fatal("Ref must be keyed")
+			}
+		}},
+		{"AC-R001-26 a different key gives a different value", func(t *testing.T) {
+			if other.Ref(address) == key.Ref(address) {
+				t.Fatal("the key must change the value")
+			}
+		}},
+		{"AC-R001-26 a missing or short key is a wiring mistake and panics", func(t *testing.T) {
+			for _, k := range []EmailRefKey{nil, EmailRefKey(strings.Repeat("k", MinEmailRefKeyBytes-1))} {
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Fatalf("Ref with a %d-byte key should panic", len(k))
+						}
+					}()
+					k.Ref(address)
+				}()
+			}
+		}},
 	}
-	if EmailRef("Coach@Example.invalid") != ref {
-		t.Fatal("EmailRef should ignore case")
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
 	}
 }

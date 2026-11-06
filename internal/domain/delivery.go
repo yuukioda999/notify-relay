@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -174,9 +175,22 @@ func IsDemoAddress(email string) bool {
 	return strings.HasSuffix(strings.ToLower(email), demoDomainSuffix)
 }
 
-// EmailRef is the value logs and delivery records keep instead of an address: the first
-// 12 hex characters of its SHA-256 (CLAUDE.md, ADR-0003 "配信記録にはハッシュ値だけを残す").
-func EmailRef(email string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(email)))
-	return hex.EncodeToString(sum[:6])
+// MinEmailRefKeyBytes is the shortest key EmailRefKey accepts.
+const MinEmailRefKeyBytes = 32
+
+// EmailRefKey is the secret for the value logs and delivery records keep instead of an
+// address (CLAUDE.md, ADR-0003 "配信記録にはハッシュ値だけを残す"). The value is keyed so that
+// someone who can read the logs cannot test a guessed address against them.
+type EmailRefKey []byte
+
+// Ref returns the first 12 hex characters of HMAC-SHA256(key, lower-cased address).
+// It panics on a missing or short key: config.Load refuses those at startup, so reaching
+// this with one is a wiring mistake that must not silently produce unkeyed values.
+func (k EmailRefKey) Ref(email string) string {
+	if len(k) < MinEmailRefKeyBytes {
+		panic("domain: EmailRefKey is missing or shorter than 32 bytes")
+	}
+	mac := hmac.New(sha256.New, k)
+	mac.Write([]byte(strings.ToLower(email)))
+	return hex.EncodeToString(mac.Sum(nil)[:6])
 }
