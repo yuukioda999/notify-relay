@@ -320,3 +320,14 @@ func nullTime(t *time.Time) sql.NullTime {
 	}
 	return sql.NullTime{Time: t.UTC(), Valid: true}
 }
+
+// DeleteAcceptedBefore deletes up to limit deliveries accepted before the given time. Their
+// recipients go with them (ON DELETE CASCADE), and so does the dedupe key, which lives on
+// the delivery row (AC-R001-22).
+func (s *Store) DeleteAcceptedBefore(ctx context.Context, before time.Time, limit int) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, "DELETE FROM deliveries WHERE accepted_at < ? ORDER BY accepted_at LIMIT ?", before.UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete old deliveries: %w", err)
+	}
+	return res.RowsAffected()
+}

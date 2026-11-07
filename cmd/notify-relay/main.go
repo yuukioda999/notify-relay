@@ -23,6 +23,9 @@ import (
 // idlePoll is how long the sender waits when nothing is due.
 const idlePoll = time.Second
 
+// purgeInterval is how often deliveries older than 7 days are deleted (AC-R001-22, ADR-0018 in team-ops).
+const purgeInterval = time.Hour
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
@@ -81,11 +84,17 @@ func run(logger *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	purger := &usecase.Purger{Store: store, Now: time.Now, Logger: logger}
+
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		sender.Run(ctx, idlePoll)
+	}()
+	go func() {
+		defer wg.Done()
+		purger.Run(ctx, purgeInterval)
 	}()
 
 	errCh := make(chan error, 1)
