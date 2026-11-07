@@ -28,12 +28,18 @@ type Outcome struct {
 	NextAttempt time.Time // set when Status is pending
 }
 
+// ErrRecipientGone is returned by Record when the recipient no longer exists, for example
+// because the delivery was purged after 7 days while it was being sent (AC-R001-22).
+// Trying again cannot help.
+var ErrRecipientGone = errors.New("recipient no longer exists")
+
 // SendQueue hands out due recipients and records results.
 type SendQueue interface {
 	// Claim marks up to limit due recipients as "sending" and returns them. A recipient
 	// is handed to one sender only.
 	Claim(ctx context.Context, now time.Time, limit int) ([]Job, error)
 	// Record stores the outcome. Reaching a final status deletes the address (AC-R001-15).
+	// It returns ErrRecipientGone when the recipient was deleted.
 	Record(ctx context.Context, recipientID int64, o Outcome, now time.Time) error
 	// Release returns claimed recipients that were not sent to "pending".
 	Release(ctx context.Context, recipientIDs []int64) error
@@ -170,8 +176,13 @@ func (s *Sender) process(ctx context.Context, j Job) {
 	var err error
 	for _, delay := range append([]time.Duration{0}, recordRetryDelays...) {
 		time.Sleep(delay)
-		if err = s.Queue.Record(ctx, j.RecipientID, o, s.now()); err == nil {
+		err = s.Queue.Record(ctx, j.RecipientID, o, s.now())
+		if err == nil {
 			log.Info("send attempt finished", "status", o.Status, "error_code", o.Code, "attempts", o.Attempts)
+			return
+		}
+		if errors.Is(err, ErrRecipientGone) {
+			log.Warn("recipient was deleted before the result was recorded", "status", o.Status)
 			return
 		}
 	}

@@ -400,3 +400,22 @@ func TestDeleteAcceptedBefore(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordAfterPurge(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	d := newDelivery("purge-while-sending", "a@example.invalid")
+	mustCreate(t, s, d)
+	jobs, err := s.Claim(ctx, t0, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("Claim = %+v, %v", jobs, err)
+	}
+	if _, err := s.DeleteAcceptedBefore(ctx, t0.Add(time.Hour), 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.Record(ctx, jobs[0].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+	if !errors.Is(err, usecase.ErrRecipientGone) {
+		t.Fatalf("AC-R001-22 Record after the purge = %v, want ErrRecipientGone", err)
+	}
+}

@@ -247,6 +247,9 @@ func (s *Store) record(ctx context.Context, recipientID int64, o usecase.Outcome
 
 	var deliveryID string
 	if err = tx.QueryRowContext(ctx, `SELECT delivery_id FROM delivery_recipients WHERE id = ?`, recipientID).Scan(&deliveryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("recipient %d: %w", recipientID, usecase.ErrRecipientGone)
+		}
 		return fmt.Errorf("recipient %d: %w", recipientID, err)
 	}
 	var locked string
