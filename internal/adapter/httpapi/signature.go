@@ -3,8 +3,6 @@ package httpapi
 import (
 	"bytes"
 	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -12,33 +10,24 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/yuukioda999/notify-relay/internal/adapter/signature"
 	"github.com/yuukioda999/notify-relay/internal/domain"
 )
 
-// Signature headers (api/openapi.yaml).
+// Signature headers (api/openapi.yaml), shared with the webhook client through package signature.
 const (
-	HeaderKeyID     = "X-Relay-Key-Id"
-	HeaderTimestamp = "X-Relay-Timestamp"
-	HeaderSignature = "X-Relay-Signature"
-	signaturePrefix = "v1="
+	HeaderKeyID     = signature.HeaderKeyID
+	HeaderTimestamp = signature.HeaderTimestamp
+	HeaderSignature = signature.HeaderSignature
 	// MaxClockSkew is how far the request time may differ from ours (replay protection).
 	MaxClockSkew = 5 * time.Minute
 )
 
 var signaturePattern = regexp.MustCompile(`^v1=[0-9a-f]{64}$`)
 
-// Sign returns the X-Relay-Signature value. The method and path are signed together with
-// the body, so a signature for one operation cannot be reused for another.
+// Sign returns the X-Relay-Signature value (see package signature).
 func Sign(secret []byte, ts int64, method, path string, body []byte) string {
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(strconv.FormatInt(ts, 10)))
-	mac.Write([]byte("."))
-	mac.Write([]byte(method))
-	mac.Write([]byte("."))
-	mac.Write([]byte(path))
-	mac.Write([]byte("."))
-	mac.Write(body)
-	return signaturePrefix + hex.EncodeToString(mac.Sum(nil))
+	return signature.Sign(secret, ts, method, path, body)
 }
 
 // requireSignature rejects requests whose signature, key ID or time is wrong, before the

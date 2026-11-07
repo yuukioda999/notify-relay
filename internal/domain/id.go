@@ -57,3 +57,13 @@ func newULID(now time.Time, entropy io.Reader) (string, error) {
 	}
 	return string(out[:]), nil
 }
+
+// NewEventID returns a new webhook event ID, for example evt_01JC9ZB4X7Q2N6R8T0V2W4Y6Z8.
+// The receiver removes duplicates by this ID (api/openapi.yaml).
+func NewEventID(now time.Time, entropy io.Reader) (string, error) {
+	u, err := newULID(now, entropy)
+	if err != nil {
+		return "", err
+	}
+	return "evt_" + u, nil
+}

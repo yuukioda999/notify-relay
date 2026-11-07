@@ -27,7 +27,7 @@ func openTestDB(t *testing.T) *Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, stmt := range []string{"DROP TABLE IF EXISTS delivery_recipients", "DROP TABLE IF EXISTS deliveries", "DROP TABLE IF EXISTS schema_migrations"} {
+	for _, stmt := range []string{"DROP TABLE IF EXISTS webhook_events", "DROP TABLE IF EXISTS delivery_recipients", "DROP TABLE IF EXISTS deliveries", "DROP TABLE IF EXISTS schema_migrations"} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}

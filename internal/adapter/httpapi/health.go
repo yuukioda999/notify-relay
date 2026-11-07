@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/yuukioda999/notify-relay/internal/usecase"
 )
 
 // ReadinessCheck reports whether a dependency (such as the database) can serve requests.
@@ -23,6 +25,8 @@ type Deps struct {
 	Checks map[string]ReadinessCheck
 	// Acceptor handles POST /v1/deliveries. The route is not registered when nil.
 	Acceptor DeliveryAcceptor
+	// Status handles GET /v1/deliveries/{delivery_id}. The route is not registered when nil.
+	Status usecase.StatusReader
 	// Keys maps X-Relay-Key-Id to the shared secret used for request signatures.
 	Keys   map[string][]byte
 	Now    func() time.Time
@@ -41,6 +45,9 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if d.Acceptor != nil {
 		mux.Handle("POST /v1/deliveries", requireSignature(d.Keys, d.Now, handleCreateDelivery(d.Acceptor, d.Logger)))
+	}
+	if d.Status != nil {
+		mux.Handle("GET /v1/deliveries/{delivery_id}", requireSignature(d.Keys, d.Now, handleGetDelivery(d.Status, d.Logger)))
 	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {

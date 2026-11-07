@@ -102,9 +102,44 @@ func TestLoad(t *testing.T) {
 				return c
 			},
 		},
+		{
+			name: "AC-R001-16 the webhook URL and the only key",
+			env:  with(map[string]string{"WEBHOOK_URL": "https://api.example.invalid/api/internal/notify-relay/events"}),
+			want: func() Config {
+				c := defaults
+				c.Webhook = Webhook{URL: "https://api.example.invalid/api/internal/notify-relay/events", KeyID: "k2026-11"}
+				return c
+			},
+		},
+		{
+			name: "AC-R001-16 http is allowed for the compose service api",
+			env:  with(map[string]string{"WEBHOOK_URL": "http://api:8000/api/internal/notify-relay/events"}),
+			want: func() Config {
+				c := defaults
+				c.Webhook = Webhook{URL: "http://api:8000/api/internal/notify-relay/events", KeyID: "k2026-11"}
+				return c
+			},
+		},
+		{name: "AC-R001-16 http to another host is refused", env: with(map[string]string{"WEBHOOK_URL": "http://example.invalid/events"}), wantErr: "WEBHOOK_URL must use https"},
+		{name: "AC-R001-16 a relative URL is refused", env: with(map[string]string{"WEBHOOK_URL": "/events"}), wantErr: "WEBHOOK_URL must be an absolute"},
+		{
+			name:    "AC-R001-18 with two keys, the webhook key must be named",
+			env:     with(map[string]string{"WEBHOOK_URL": "https://api.example.invalid/e", "RELAY_SIGNING_KEYS": "k-old:" + key32 + ",k-new:" + key32}),
+			wantErr: "WEBHOOK_KEY_ID must name one of RELAY_SIGNING_KEYS",
+		},
+		{
+			name: "AC-R001-18 the named webhook key",
+			env:  with(map[string]string{"WEBHOOK_URL": "https://api.example.invalid/e", "RELAY_SIGNING_KEYS": "k-old:" + key32 + ",k-new:" + key32, "WEBHOOK_KEY_ID": "k-new"}),
+			want: func() Config {
+				c := defaults
+				c.SigningKeys = map[string][]byte{"k-old": []byte(secret32), "k-new": []byte(secret32)}
+				c.Webhook = Webhook{URL: "https://api.example.invalid/e", KeyID: "k-new"}
+				return c
+			},
+		},
 	}
 
-	keys := []string{"PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "RECIPIENTS_INVALID_ONLY", "DB_DSN", "RELAY_SIGNING_KEYS", "EMAIL_REF_KEY", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
+	keys := []string{"WEBHOOK_URL", "WEBHOOK_KEY_ID", "PORT", "SHUTDOWN_TIMEOUT", "DEMO_MODE", "RECIPIENTS_INVALID_ONLY", "DB_DSN", "RELAY_SIGNING_KEYS", "EMAIL_REF_KEY", "SEND_CONCURRENCY", "ALLOW_LOCAL_SIGNING_KEY",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_FROM", "SMTP_FROM_NAME", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_TLS", "MAIL_FOOTER"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
