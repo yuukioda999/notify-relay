@@ -1,10 +1,12 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -168,7 +170,9 @@ type fakeQueue struct {
 	recorded    map[int64]Outcome
 	released    []int64
 	requeued    int
-	recordFails int // the first recordFails calls to Record fail
+	recordFails int  // the first recordFails calls to Record fail
+	gone        bool // Record finds the recipient deleted
+	recordCalls int
 }
 
 func (q *fakeQueue) Claim(_ context.Context, _ time.Time, limit int) ([]Job, error) {
@@ -183,6 +187,10 @@ func (q *fakeQueue) Claim(_ context.Context, _ time.Time, limit int) ([]Job, err
 func (q *fakeQueue) Record(_ context.Context, id int64, o Outcome, _ time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.recordCalls++
+	if q.gone {
+		return ErrRecipientGone
+	}
 	if q.recordFails > 0 {
 		q.recordFails--
 		return errors.New("database unavailable")
@@ -419,20 +427,33 @@ func TestRecordIsRetried(t *testing.T) {
 	tests := []struct {
 		name         string
 		fails        int
+		gone         bool
 		wantRecorded bool
+		wantCalls    int
 	}{
-		{name: "AC-R001-13 a temporary database error does not leave the recipient sending", fails: 2, wantRecorded: true},
-		{name: "AC-R001-13 a lasting database error is given up after 4 tries", fails: 10, wantRecorded: false},
+		{name: "AC-R001-13 a temporary database error does not leave the recipient sending", fails: 2, wantRecorded: true, wantCalls: 3},
+		{name: "AC-R001-13 a lasting database error is given up after 4 tries", fails: 10, wantRecorded: false, wantCalls: 4},
+		{name: "AC-R001-22 a recipient purged while sending is not retried", gone: true, wantRecorded: false, wantCalls: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}, recordFails: tt.fails}
-			s := &Sender{RefKey: testRefKey, Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			q := &fakeQueue{jobs: []Job{{RecipientID: 1, Email: "a@example.invalid"}}, recordFails: tt.fails, gone: tt.gone}
+			var logs bytes.Buffer
+			s := &Sender{RefKey: testRefKey, Queue: q, Mailer: &fakeMailer{}, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 			if _, err := s.SendDue(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if _, ok := q.recorded[1]; ok != tt.wantRecorded {
 				t.Fatalf("recorded = %v, want %v", ok, tt.wantRecorded)
+			}
+			if q.recordCalls != tt.wantCalls {
+				t.Fatalf("Record called %d times, want %d", q.recordCalls, tt.wantCalls)
+			}
+			if tt.gone && (strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "level=WARN")) {
+				t.Fatalf("want one warning and no error, got %s", logs.String())
+			}
+			if strings.Contains(logs.String(), "a@example.invalid") {
+				t.Fatal("the address was logged")
 			}
 		})
 	}

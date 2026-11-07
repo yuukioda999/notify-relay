@@ -340,3 +340,82 @@ func TestRecordsKeepOnlyWhatIsNeeded(t *testing.T) {
 		}
 	})
 }
+
+func TestDeleteAcceptedBefore(t *testing.T) {
+	tests := []struct {
+		name        string
+		acceptedAgo []time.Duration // how long before the cutoff (negative: after)
+		limit       int
+		wantDeleted int64
+		wantLeft    int
+		wantLeftKey string // the dedupe key of the one delivery left, when checked
+	}{
+		{name: "AC-R001-22 only deliveries accepted before the cutoff are deleted", acceptedAgo: []time.Duration{time.Hour, time.Second, -time.Second}, limit: 1000, wantDeleted: 2, wantLeft: 1},
+		{name: "AC-R001-22 at most limit deliveries per call, oldest first", acceptedAgo: []time.Duration{3 * time.Hour, 2 * time.Hour, time.Hour}, limit: 2, wantDeleted: 2, wantLeft: 1, wantLeftKey: "purge-2"},
+		{name: "AC-R001-22 nothing old", acceptedAgo: []time.Duration{-time.Hour}, limit: 1000, wantDeleted: 0, wantLeft: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestDB(t)
+			ctx := context.Background()
+			cutoff := t0
+			for i, ago := range tt.acceptedAgo {
+				d := newDelivery(fmt.Sprintf("purge-%d", i), "a@example.invalid", "b@example.invalid")
+				d.AcceptedAt = cutoff.Add(-ago)
+				id, _ := domain.NewDeliveryID(d.AcceptedAt, nil)
+				d.ID = id
+				if err := s.Create(ctx, d); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			deleted, err := s.DeleteAcceptedBefore(ctx, cutoff, tt.limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if deleted != tt.wantDeleted {
+				t.Errorf("deleted = %d, want %d", deleted, tt.wantDeleted)
+			}
+			var deliveries, recipients int
+			_ = s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM deliveries").Scan(&deliveries)
+			_ = s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM delivery_recipients").Scan(&recipients)
+			if deliveries != tt.wantLeft || recipients != 2*tt.wantLeft {
+				t.Errorf("left %d deliveries and %d recipients, want %d and %d", deliveries, recipients, tt.wantLeft, 2*tt.wantLeft)
+			}
+
+			if tt.wantLeftKey != "" {
+				var key string
+				_ = s.DB.QueryRowContext(ctx, "SELECT dedupe_key FROM deliveries").Scan(&key)
+				if key != tt.wantLeftKey {
+					t.Errorf("left %q, want the newest %q", key, tt.wantLeftKey)
+				}
+			}
+
+			// The dedupe key goes with the delivery: the same key is accepted again as new
+			if tt.wantDeleted > 0 {
+				if _, err := s.FindByDedupeKey(ctx, "purge-0"); !errors.Is(err, usecase.ErrNotFound) {
+					t.Errorf("dedupe key of a deleted delivery still found: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordAfterPurge(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	d := newDelivery("purge-while-sending", "a@example.invalid")
+	mustCreate(t, s, d)
+	jobs, err := s.Claim(ctx, t0, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("Claim = %+v, %v", jobs, err)
+	}
+	if _, err := s.DeleteAcceptedBefore(ctx, t0.Add(time.Hour), 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.Record(ctx, jobs[0].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+	if !errors.Is(err, usecase.ErrRecipientGone) {
+		t.Fatalf("AC-R001-22 Record after the purge = %v, want ErrRecipientGone", err)
+	}
+}
