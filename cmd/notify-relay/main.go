@@ -15,6 +15,7 @@ import (
 
 	"github.com/yuukioda999/notify-relay/internal/adapter/httpapi"
 	"github.com/yuukioda999/notify-relay/internal/adapter/smtpmail"
+	"github.com/yuukioda999/notify-relay/internal/adapter/webhook"
 	"github.com/yuukioda999/notify-relay/internal/config"
 	"github.com/yuukioda999/notify-relay/internal/infra/mysqlstore"
 	"github.com/yuukioda999/notify-relay/internal/usecase"
@@ -22,6 +23,9 @@ import (
 
 // idlePoll is how long the sender waits when nothing is due.
 const idlePoll = time.Second
+
+// webhookInterval is how often results are batched and webhooks are sent (AC-R001-16: within 5 seconds).
+const webhookInterval = time.Second
 
 // purgeInterval is how often deliveries older than 7 days are deleted (AC-R001-22, ADR-0018 in team-ops).
 const purgeInterval = time.Hour
@@ -75,6 +79,7 @@ func run(logger *slog.Logger) error {
 		Handler: httpapi.NewRouter(httpapi.Deps{
 			Checks:   map[string]httpapi.ReadinessCheck{"database": db.PingContext},
 			Acceptor: &usecase.Acceptor{Store: store, DemoMode: cfg.InvalidRecipientsOnly},
+			Status:   store,
 			Keys:     cfg.SigningKeys,
 			Logger:   logger,
 		}),
@@ -96,6 +101,20 @@ func run(logger *slog.Logger) error {
 		defer wg.Done()
 		purger.Run(ctx, purgeInterval)
 	}()
+	if cfg.Webhook.URL != "" {
+		notifier := &usecase.Notifier{
+			Store:  store,
+			Sender: &webhook.Client{URL: cfg.Webhook.URL, KeyID: cfg.Webhook.KeyID, Secret: cfg.SigningKeys[cfg.Webhook.KeyID]},
+			Logger: logger,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			notifier.Run(ctx, webhookInterval)
+		}()
+	} else {
+		logger.Warn("WEBHOOK_URL is not set; results are kept and sent once it is set")
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

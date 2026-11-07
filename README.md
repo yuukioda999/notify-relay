@@ -35,6 +35,8 @@
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | | | SMTP認証(指定したときだけ使う) |
 | `SMTP_FROM` / `SMTP_FROM_NAME` | | `no-reply@team-ops.invalid` / `チーム運営` | 差出人 |
 | `SEND_CONCURRENCY` | | `50` | 同時に送る数 |
+| `WEBHOOK_URL` | | | 送信結果の webhook の送り先(業務アプリ)。依頼ごとには指定させない。https が必須(localhost と compose の `api` だけ http を使える)。未設定のあいだ結果は送らずに残し、設定したあとで送る |
+| `WEBHOOK_KEY_ID` | | 鍵が1つならその鍵 | webhook の署名に使う鍵ID(`RELAY_SIGNING_KEYS` のどれか) |
 | `RECIPIENTS_INVALID_ONLY` | | `false` | `true` のとき `.invalid` ドメイン以外の宛先を拒否する(team-ops-api と同じ名前) |
 | `DEMO_MODE` | | `false` | `RECIPIENTS_INVALID_ONLY` の別名。どちらかが `true` なら宛先を制限する |
 | `PORT` / `SHUTDOWN_TIMEOUT` | | `8080` / `30s` | 待ち受けポートと、停止時に送信の完了を待つ時間 |

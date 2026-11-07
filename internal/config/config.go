@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -34,6 +35,14 @@ type Config struct {
 	// SendConcurrency is how many mails are sent at once (AC-R001-08).
 	SendConcurrency int
 	SMTP            SMTP
+	// Webhook is where results are sent (AC-R001-16 to 20). Webhooks are off when URL is empty.
+	Webhook Webhook
+}
+
+// Webhook is the business app's fixed result endpoint and the key used to sign for it.
+type Webhook struct {
+	URL   string
+	KeyID string
 }
 
 // SMTP is the outgoing mail server.
@@ -58,6 +67,9 @@ var publishedLocalKeys = []string{"local-dev-relay-signing-key-0001", "local-dev
 // plaintextSMTPHosts may be used with SMTP_TLS=none: they are on the same machine or the
 // local compose network, so addresses and login links do not cross a real network in clear.
 var plaintextSMTPHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true, "mailpit": true}
+
+// plaintextWebhookHosts may receive webhooks over http: the same machine or the compose network.
+var plaintextWebhookHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true, "api": true}
 
 // Load reads Config from the environment, applying defaults for unset values.
 func Load() (Config, error) {
@@ -140,10 +152,41 @@ func Load() (Config, error) {
 		errs = append(errs, fmt.Errorf("SMTP_TLS must be none, starttls or tls"))
 	}
 
+	webhook, err := parseWebhook(os.Getenv("WEBHOOK_URL"), os.Getenv("WEBHOOK_KEY_ID"), keys)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	cfg.Webhook = webhook
+
 	if len(errs) > 0 {
 		return Config{}, errors.Join(errs...)
 	}
 	return cfg, nil
+}
+
+// parseWebhook checks the result endpoint. The URL is fixed here and never taken from a
+// request, so results cannot be sent somewhere unintended. It must be https, except for a
+// receiver on the same machine or the compose network. The key ID defaults to the only key.
+func parseWebhook(rawURL, keyID string, keys map[string][]byte) (Webhook, error) {
+	if rawURL == "" {
+		return Webhook{}, nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.RawQuery != "" || u.User != nil {
+		return Webhook{}, errors.New("WEBHOOK_URL must be an absolute http(s) URL without query or credentials")
+	}
+	if u.Scheme == "http" && !plaintextWebhookHosts[u.Hostname()] {
+		return Webhook{}, errors.New("WEBHOOK_URL must use https, except for localhost or the compose service api")
+	}
+	if keyID == "" && len(keys) == 1 {
+		for id := range keys {
+			keyID = id
+		}
+	}
+	if _, ok := keys[keyID]; !ok {
+		return Webhook{}, errors.New("WEBHOOK_KEY_ID must name one of RELAY_SIGNING_KEYS")
+	}
+	return Webhook{URL: rawURL, KeyID: keyID}, nil
 }
 
 // parseKeys reads "keyid:base64secret,keyid2:base64secret". Secrets must be at least 32 bytes.
