@@ -361,9 +361,9 @@ func TestDeleteAcceptedBefore(t *testing.T) {
 			cutoff := t0
 			for i, ago := range tt.acceptedAgo {
 				d := newDelivery(fmt.Sprintf("purge-%d", i), "a@example.invalid", "b@example.invalid")
-				d.Accepted.AcceptedAt = cutoff.Add(-ago)
-				id, _ := domain.NewDeliveryID(d.Accepted.AcceptedAt, nil)
-				d.Accepted.ID = id
+				d.AcceptedAt = cutoff.Add(-ago)
+				id, _ := domain.NewDeliveryID(d.AcceptedAt, nil)
+				d.ID = id
 				if err := s.Create(ctx, d); err != nil {
 					t.Fatal(err)
 				}
