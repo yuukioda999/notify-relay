@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,6 +164,17 @@ func TestCreateCompletedEvents(t *testing.T) {
 	if _, err := s.CreateResultEvents(ctx, at, usecase.ResultBatchMax, usecase.ResultBatchWait); err != nil {
 		t.Fatal(err)
 	}
+	// The completed event also waits until the results event has been accepted
+	if n, err := s.CreateCompletedEvents(ctx, at); err != nil || n != 0 {
+		t.Fatalf("AC-R001-17 completed before the results were sent: %d, %v", n, err)
+	}
+	claimed, err := s.ClaimDueEvents(ctx, at, 10, time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d, %v", len(claimed), err)
+	}
+	if err := s.MarkEventSent(ctx, claimed[0].ID, at); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		if _, err := s.CreateCompletedEvents(ctx, at); err != nil {
 			t.Fatal(err)
@@ -284,4 +296,105 @@ func TestDeliveryStatus(t *testing.T) {
 			t.Fatalf("AC-R001-22 %d events left after the purge", n)
 		}
 	})
+}
+
+func TestResultEventsWhileRecording(t *testing.T) {
+	tests := []struct {
+		name       string
+		recipients int
+	}{
+		{name: "AC-R001-16 AC-R001-17 each result is reported once and completed once while recording runs", recipients: 40},
+		{name: "AC-R001-16 AC-R001-17 the same with a full batch", recipients: 520},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestDB(t)
+			mustCreate(t, s, newDelivery(fmt.Sprintf("concurrent-%d", tt.recipients), emails(tt.recipients)...))
+			jobs, err := s.Claim(ctx, t0, tt.recipients)
+			if err != nil || len(jobs) != tt.recipients {
+				t.Fatalf("claim = %d, %v", len(jobs), err)
+			}
+
+			// Record from several goroutines while batching runs in a loop (ResultBatchWait 0: batch every result at once)
+			done := make(chan struct{})
+			batchErr := make(chan error, 1)
+			go func() {
+				defer close(batchErr)
+				for {
+					if _, err := s.CreateResultEvents(ctx, t0, usecase.ResultBatchMax, 0); err != nil {
+						batchErr <- err
+						return
+					}
+					if _, err := s.CreateCompletedEvents(ctx, t0); err != nil {
+						batchErr <- err
+						return
+					}
+					select {
+					case <-done:
+						return
+					default:
+					}
+				}
+			}()
+			var wg sync.WaitGroup
+			for w := range 4 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := w; i < len(jobs); i += 4 {
+						if err := s.Record(ctx, jobs[i].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0); err != nil {
+							t.Error(err)
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			close(done)
+			if err := <-batchErr; err != nil {
+				t.Fatalf("batching failed: %v", err)
+			}
+			// Finish: put the rest into events, send them all, then the completed event
+			if _, err := s.CreateResultEvents(ctx, t0, usecase.ResultBatchMax, 0); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				claimed, err := s.ClaimDueEvents(ctx, t0.Add(time.Hour), 100, time.Minute)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(claimed) == 0 {
+					break
+				}
+				for _, e := range claimed {
+					if err := s.MarkEventSent(ctx, e.ID, t0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := s.CreateCompletedEvents(ctx, t0); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			seen := map[string]int{}
+			completed := 0
+			for _, e := range events(t, s) {
+				if e.Type == "delivery.completed" {
+					completed++
+					continue
+				}
+				for _, r := range e.Payload["results"].([]any) {
+					seen[r.(map[string]any)["recipient_ref"].(string)]++
+				}
+			}
+			if len(seen) != tt.recipients || completed != 1 {
+				t.Fatalf("reported %d recipients, %d completed events; want %d and 1", len(seen), completed, tt.recipients)
+			}
+			for ref, n := range seen {
+				if n != 1 {
+					t.Fatalf("%s reported %d times", ref, n)
+				}
+			}
+		})
+	}
 }

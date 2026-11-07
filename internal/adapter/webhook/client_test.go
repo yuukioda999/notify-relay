@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yuukioda999/notify-relay/internal/adapter/httpapi"
+	"github.com/yuukioda999/notify-relay/internal/adapter/signature"
 	"github.com/yuukioda999/notify-relay/internal/usecase"
 )
 
@@ -63,11 +63,11 @@ func TestClientSend(t *testing.T) {
 			}
 
 			// AC-R001-18 signature, time, event_id and traceparent
-			ts := got.Header.Get(httpapi.HeaderTimestamp)
-			if ts != strconv.FormatInt(sentAt.Unix(), 10) || got.Header.Get(httpapi.HeaderKeyID) != "k1" {
+			ts := got.Header.Get(signature.HeaderTimestamp)
+			if ts != strconv.FormatInt(sentAt.Unix(), 10) || got.Header.Get(signature.HeaderKeyID) != "k1" {
 				t.Fatalf("headers = %v", got.Header)
 			}
-			if want := httpapi.Sign(secret, sentAt.Unix(), http.MethodPost, "/api/internal/notify-relay/events", body); got.Header.Get(httpapi.HeaderSignature) != want {
+			if want := signature.Sign(secret, sentAt.Unix(), http.MethodPost, "/api/internal/notify-relay/events", body); got.Header.Get(signature.HeaderSignature) != want {
 				t.Fatal("signature does not match the body")
 			}
 			if got.Header.Get("traceparent") != event.Traceparent {
@@ -79,6 +79,34 @@ func TestClientSend(t *testing.T) {
 			}
 			if m["event_id"] != event.ID || m["sent_at"] != "2026-11-07T12:00:00Z" {
 				t.Fatalf("body = %s", body)
+			}
+		})
+	}
+}
+
+func TestClientTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		delay time.Duration
+		retry bool
+	}{
+		{name: "AC-R001-19 an answer within the limit is success", delay: 0, retry: false},
+		{name: "AC-R001-19 no answer within the limit is an error to retry", delay: 300 * time.Millisecond, retry: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-time.After(tt.delay):
+				case <-r.Context().Done():
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			c := &Client{URL: srv.URL + "/e", KeyID: "k1", Secret: secret, Timeout: 100 * time.Millisecond}
+			err := c.Send(context.Background(), usecase.WebhookEvent{ID: "evt_1", Payload: []byte(`{}`)}, time.Now())
+			if got := err != nil && !errors.Is(err, usecase.ErrWebhookUnauthorized); got != tt.retry {
+				t.Fatalf("Send() = %v, want retry %v", err, tt.retry)
 			}
 		})
 	}

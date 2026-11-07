@@ -78,15 +78,20 @@ func WebhookRetryDelay(failedAttempts int) time.Duration {
 	return min(d, time.Hour)
 }
 
-// Once makes the events that are due and sends the events waiting to be sent.
-func (n *Notifier) Once(ctx context.Context) error {
+// Batch turns waiting results into events (AC-R001-16) and complete deliveries into
+// completed events (AC-R001-17). It runs in its own loop, so slow sending does not delay it.
+func (n *Notifier) Batch(ctx context.Context) error {
 	now := n.now()
 	if _, err := n.Store.CreateResultEvents(ctx, now, ResultBatchMax, ResultBatchWait); err != nil {
 		return err
 	}
-	if _, err := n.Store.CreateCompletedEvents(ctx, now); err != nil {
-		return err
-	}
+	_, err := n.Store.CreateCompletedEvents(ctx, now)
+	return err
+}
+
+// Dispatch sends the events that are due (AC-R001-18 to 20).
+func (n *Notifier) Dispatch(ctx context.Context) error {
+	now := n.now()
 	events, err := n.Store.ClaimDueEvents(ctx, now, webhookClaimLimit, webhookLease)
 	if err != nil {
 		return err
@@ -131,20 +136,29 @@ func (n *Notifier) send(ctx context.Context, e WebhookEvent) {
 	}
 }
 
-// Run calls Once every interval until ctx is done. Errors are logged and retried.
+// Run batches and sends in two loops, each every interval, until ctx is done. Errors are
+// logged and retried at the next interval.
 func (n *Notifier) Run(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if err := n.Once(ctx); err != nil && ctx.Err() == nil {
-			n.logger().Error("webhook round failed", "error", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	var wg sync.WaitGroup
+	for name, step := range map[string]func(context.Context) error{"batch": n.Batch, "dispatch": n.Dispatch} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				if err := step(ctx); err != nil && ctx.Err() == nil {
+					n.logger().Error("webhook "+name+" failed", "error", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func (n *Notifier) now() time.Time {

@@ -183,6 +183,7 @@ func (s *Store) CreateCompletedEvents(ctx context.Context, now time.Time) (int, 
 	rows, err := s.DB.QueryContext(ctx, `SELECT d.id FROM deliveries d
 		WHERE d.completed_reported_at IS NULL AND d.completed_at IS NOT NULL
 		  AND NOT EXISTS (SELECT 1 FROM delivery_recipients r WHERE r.delivery_id = d.id AND r.reported_at IS NULL)
+		  AND NOT EXISTS (SELECT 1 FROM webhook_events e WHERE e.delivery_id = d.id AND e.type = 'delivery.results' AND e.sent_at IS NULL AND e.gave_up_at IS NULL)
 		LIMIT ?`, candidateLimit)
 	if err != nil {
 		return 0, err
@@ -245,6 +246,16 @@ func (s *Store) createCompletedEvent(ctx context.Context, deliveryID string, now
 	}
 	if unreported > 0 {
 		return 0, tx.Commit() // results go first
+	}
+	// The completed event goes out only after every results event was accepted (or given up),
+	// so the business app never sees "completed" while results are still on their way (ADR-0019)
+	var waiting bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM webhook_events
+		WHERE delivery_id = ? AND type = 'delivery.results' AND sent_at IS NULL AND gave_up_at IS NULL)`, deliveryID).Scan(&waiting); err != nil {
+		return 0, err
+	}
+	if waiting {
+		return 0, tx.Commit()
 	}
 	eventID, err := domain.NewEventID(now, nil)
 	if err != nil {

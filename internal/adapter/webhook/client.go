@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/yuukioda999/notify-relay/internal/adapter/httpapi"
+	"github.com/yuukioda999/notify-relay/internal/adapter/signature"
 	"github.com/yuukioda999/notify-relay/internal/usecase"
 )
 
@@ -25,6 +25,8 @@ type Client struct {
 	KeyID  string
 	Secret []byte
 	HTTP   *http.Client
+	// Timeout overrides the 10-second limit (tests use a shorter one).
+	Timeout time.Duration
 }
 
 var _ usecase.WebhookSender = (*Client)(nil)
@@ -46,7 +48,11 @@ func (c *Client) Send(ctx context.Context, e usecase.WebhookEvent, sentAt time.T
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, Timeout)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(raw))
 	if err != nil {
@@ -54,9 +60,9 @@ func (c *Client) Send(ctx context.Context, e usecase.WebhookEvent, sentAt time.T
 	}
 	ts := sentAt.Unix()
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(httpapi.HeaderKeyID, c.KeyID)
-	req.Header.Set(httpapi.HeaderTimestamp, fmt.Sprint(ts))
-	req.Header.Set(httpapi.HeaderSignature, httpapi.Sign(c.Secret, ts, http.MethodPost, u.EscapedPath(), raw))
+	req.Header.Set(signature.HeaderKeyID, c.KeyID)
+	req.Header.Set(signature.HeaderTimestamp, fmt.Sprint(ts))
+	req.Header.Set(signature.HeaderSignature, signature.Sign(c.Secret, ts, http.MethodPost, u.EscapedPath(), raw))
 	if e.Traceparent != "" {
 		req.Header.Set("traceparent", e.Traceparent)
 	}
@@ -64,7 +70,7 @@ func (c *Client) Send(ctx context.Context, e usecase.WebhookEvent, sentAt time.T
 	client := c.HTTP
 	if client == nil {
 		// Never follow a redirect: the receiver URL is fixed by configuration
-		client = &http.Client{Timeout: Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client = &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	resp, err := client.Do(req)
 	if err != nil {

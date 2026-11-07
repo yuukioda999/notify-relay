@@ -80,11 +80,14 @@ func TestNotifierOutcomes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeWebhookStore{due: []WebhookEvent{{ID: "evt_1", Attempts: tt.attempts, CreatedAt: now.Add(-tt.createdAgo)}}}
 			n := &Notifier{Store: store, Sender: &fakeWebhookSender{err: tt.sendErr}, Now: func() time.Time { return now }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-			if err := n.Once(context.Background()); err != nil {
+			if err := n.Batch(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if store.created != 1 {
-				t.Fatal("results were not batched before sending")
+				t.Fatal("results were not batched")
+			}
+			if err := n.Dispatch(context.Background()); err != nil {
+				t.Fatal(err)
 			}
 			if got := len(store.sent) == 1; got != tt.wantSent {
 				t.Fatalf("sent = %v, want %v", got, tt.wantSent)
