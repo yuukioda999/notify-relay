@@ -85,4 +85,7 @@ jobs:
         with:
           context: .
           push: ${{ github.ref == 'refs/heads/main' }}
-          tags: ghcr.io/${{ github.repository }}:latest
+          # 本番のサーバーはコミットのハッシュのタグを指定して取ってくる(team-ops の ADR-0022)
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
