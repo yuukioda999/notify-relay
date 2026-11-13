@@ -132,12 +132,11 @@ dispatch:
 
 // Run sends due recipients until ctx is canceled, then returns once the mail being sent is done.
 //
-// The workers are kept busy without waiting for a whole batch: whenever there is room in the
-// hand-over queue (as many places as workers) is half free, more due recipients are claimed
-// (ADR-0003). A slow
-// mail therefore holds up only its own worker, not the next claim. On cancel no new mail starts:
-// mail being sent is finished and recorded, and claimed recipients not yet started are released
-// (AC-R001-14).
+// The workers are kept busy without waiting for a whole batch: whenever the hand-over queue (as
+// many places as workers) is at least half free, more due recipients are claimed (ADR-0003). A
+// slow mail therefore holds up only its own worker, not the next claim. On cancel no new mail
+// starts: mail being sent is finished and recorded, and claimed recipients not yet started are
+// released (AC-R001-14).
 func (s *Sender) Run(ctx context.Context, idle time.Duration) {
 	if n, err := s.Queue.RequeueInterrupted(ctx); err != nil {
 		s.logger().Error("requeue interrupted recipients", "error", err)

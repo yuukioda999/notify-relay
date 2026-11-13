@@ -174,11 +174,17 @@ type fakeQueue struct {
 	recordFails int  // the first recordFails calls to Record fail
 	gone        bool // Record finds the recipient deleted
 	recordCalls int
+	claimErr    error // Claim fails with this
+	claimCalls  int
 }
 
 func (q *fakeQueue) Claim(_ context.Context, _ time.Time, limit int) ([]Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.claimCalls++
+	if q.claimErr != nil {
+		return nil, q.claimErr
+	}
 	n := min(limit, len(q.jobs))
 	out := q.jobs[:n]
 	q.jobs = q.jobs[n:]
@@ -349,6 +355,24 @@ func TestRun(t *testing.T) {
 	t.Run("AC-R001-13 interrupted work is requeued at start and Run stops on cancel", testRunRequeuesAndStops)
 	t.Run("AC-R001-08 a slow mail does not hold up the next claims", testRunKeepsWorkersBusy)
 	t.Run("AC-R001-14 on the stop signal Run finishes started mail and releases the rest", testRunShutdown)
+	t.Run("AC-R001-08 a failing claim waits before asking again", testRunClaimErrorWaits)
+}
+
+func testRunClaimErrorWaits(t *testing.T) {
+	q := &fakeQueue{claimErr: errors.New("database unavailable")}
+	s := &Sender{RefKey: testRefKey, Queue: q, Mailer: &fakeMailer{}, Concurrency: 4, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx, 20*time.Millisecond); close(done) }()
+	time.Sleep(110 * time.Millisecond)
+	cancel()
+	<-done
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// One claim per idle period (20ms) in 110ms: about 6, never a busy loop
+	if q.claimCalls < 2 || q.claimCalls > 10 {
+		t.Errorf("Claim called %d times in 110ms with a 20ms idle, want about 6", q.claimCalls)
+	}
 }
 
 // runUntil starts Run and waits until cond is true or fails after 2 seconds.
@@ -404,45 +428,50 @@ func testRunKeepsWorkersBusy(t *testing.T) {
 }
 
 func testRunShutdown(t *testing.T) {
+	// Every mail hangs until release is closed, so at the stop signal 4 mails are being sent and
+	// at least half of the hand-over queue (2 of 4) is claimed but not started
 	q := &fakeQueue{}
 	for i := range 30 {
-		q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: "a@example.invalid"})
+		q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: fmt.Sprintf("r%d@example.invalid", i+1)})
 	}
-	m := &fakeMailer{delay: 20 * time.Millisecond}
+	release := make(chan struct{})
+	m := &blockingMailer{blockAll: true, release: release}
 	s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Concurrency: 4, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	cancel, done := runUntil(t, s, func() bool {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return m.active > 0
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return m.activeNow() == 4 && len(q.jobs) <= 30-4-2
 	})
+	q.mu.Lock()
+	unclaimed := len(q.jobs)
+	q.mu.Unlock()
 	cancel()
+	close(release)
 	<-done
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(q.recorded) != len(m.sent) {
-		t.Errorf("recorded %d but sent %d: every started mail is recorded", len(q.recorded), len(m.sent))
+	if got := m.count(); got != 4 || len(q.recorded) != 4 {
+		t.Errorf("sent %d, recorded %d; want the 4 started mails finished and recorded", got, len(q.recorded))
 	}
-	// Every recipient is accounted for once: sent, released, or never claimed
-	if got := len(m.sent) + len(q.released) + len(q.jobs); got != 30 {
-		t.Errorf("sent %d + released %d + unclaimed %d = %d, want 30", len(m.sent), len(q.released), len(q.jobs), got)
+	if want := 30 - unclaimed - 4; len(q.released) != want {
+		t.Errorf("released %d, want the %d claimed but not started", len(q.released), want)
 	}
-	if len(q.released) == 0 {
-		t.Errorf("claimed recipients waiting in the queue were not released")
+	if len(q.jobs) != unclaimed {
+		t.Errorf("%d left unclaimed, want %d: nothing is claimed after the stop signal", len(q.jobs), unclaimed)
 	}
 }
 
 // blockingMailer holds the mail to one address until release is closed.
 type blockingMailer struct {
-	block   string
-	release chan struct{}
-	mu      sync.Mutex
-	sent    int
-	active  int
-	peak    int
+	block    string
+	blockAll bool
+	release  chan struct{}
+	mu       sync.Mutex
+	sent     int
+	active   int
+	peak     int
 }
 
 func (m *blockingMailer) Send(_ context.Context, mail Mail) error {
@@ -450,7 +479,7 @@ func (m *blockingMailer) Send(_ context.Context, mail Mail) error {
 	m.active++
 	m.peak = max(m.peak, m.active)
 	m.mu.Unlock()
-	if mail.To == m.block {
+	if m.blockAll || mail.To == m.block {
 		<-m.release
 	}
 	m.mu.Lock()
@@ -464,6 +493,12 @@ func (m *blockingMailer) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sent
+}
+
+func (m *blockingMailer) activeNow() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active
 }
 
 func (m *blockingMailer) peakActive() int {
