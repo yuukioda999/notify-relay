@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -346,6 +347,129 @@ func TestSendDueRespectsConcurrency(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	t.Run("AC-R001-13 interrupted work is requeued at start and Run stops on cancel", testRunRequeuesAndStops)
+	t.Run("AC-R001-08 a slow mail does not hold up the next claims", testRunKeepsWorkersBusy)
+	t.Run("AC-R001-14 on the stop signal Run finishes started mail and releases the rest", testRunShutdown)
+}
+
+// runUntil starts Run and waits until cond is true or fails after 2 seconds.
+func runUntil(t *testing.T, s *Sender, cond func() bool) (cancel func(), done <-chan struct{}) {
+	t.Helper()
+	ctx, cancelFn := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() { s.Run(ctx, 5*time.Millisecond); close(finished) }()
+	deadline := time.After(2 * time.Second)
+	for !cond() {
+		select {
+		case <-deadline:
+			cancelFn()
+			t.Fatal("condition not reached")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	return cancelFn, finished
+}
+
+func testRunKeepsWorkersBusy(t *testing.T) {
+	// 20 recipients, 3 workers, claims of 3. The first mail hangs until the end; with a batch that waits for all
+	// of its mail, nothing after the first batch would be sent while it hangs
+	q := &fakeQueue{}
+	for i := range 20 {
+		q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: fmt.Sprintf("r%d@example.invalid", i+1)})
+	}
+	release := make(chan struct{})
+	m := &blockingMailer{block: "r1@example.invalid", release: release}
+	s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Concurrency: 3, BatchSize: 3, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	cancel, done := runUntil(t, s, func() bool { return m.count() == 19 })
+	if p := m.peakActive(); p > 3 {
+		t.Errorf("peak concurrency %d exceeds 3 (AC-R001-08)", p)
+	}
+	close(release)
+	deadline := time.After(2 * time.Second)
+	for {
+		q.mu.Lock()
+		n := len(q.recorded)
+		q.mu.Unlock()
+		if n == 20 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("recorded %d of 20", n)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+}
+
+func testRunShutdown(t *testing.T) {
+	q := &fakeQueue{}
+	for i := range 30 {
+		q.jobs = append(q.jobs, Job{RecipientID: int64(i + 1), Email: "a@example.invalid"})
+	}
+	m := &fakeMailer{delay: 20 * time.Millisecond}
+	s := &Sender{RefKey: testRefKey, Queue: q, Mailer: m, Concurrency: 4, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	cancel, done := runUntil(t, s, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.active > 0
+	})
+	cancel()
+	<-done
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(q.recorded) != len(m.sent) {
+		t.Errorf("recorded %d but sent %d: every started mail is recorded", len(q.recorded), len(m.sent))
+	}
+	// Every recipient is accounted for once: sent, released, or never claimed
+	if got := len(m.sent) + len(q.released) + len(q.jobs); got != 30 {
+		t.Errorf("sent %d + released %d + unclaimed %d = %d, want 30", len(m.sent), len(q.released), len(q.jobs), got)
+	}
+	if len(q.released) == 0 {
+		t.Errorf("claimed recipients waiting in the queue were not released")
+	}
+}
+
+// blockingMailer holds the mail to one address until release is closed.
+type blockingMailer struct {
+	block   string
+	release chan struct{}
+	mu      sync.Mutex
+	sent    int
+	active  int
+	peak    int
+}
+
+func (m *blockingMailer) Send(_ context.Context, mail Mail) error {
+	m.mu.Lock()
+	m.active++
+	m.peak = max(m.peak, m.active)
+	m.mu.Unlock()
+	if mail.To == m.block {
+		<-m.release
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.active--
+	m.sent++
+	return nil
+}
+
+func (m *blockingMailer) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sent
+}
+
+func (m *blockingMailer) peakActive() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.peak
 }
 
 func testRunRequeuesAndStops(t *testing.T) {
