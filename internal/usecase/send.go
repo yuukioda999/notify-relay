@@ -76,8 +76,10 @@ type Sender struct {
 	Now    func() time.Time
 }
 
-// SendDue claims one batch and sends it. When ctx is canceled no new mail is started: mail
-// already being sent is finished and recorded, and the rest of the batch is released (AC-R001-14).
+// SendDue claims one batch, sends it and waits for all of it. Run does not use it (Run keeps the
+// workers busy without waiting for a whole batch); it is kept for sending once, as in the tests.
+// When ctx is canceled no new mail is started: mail already being sent is finished and recorded,
+// and the rest of the batch is released (AC-R001-14).
 // It returns how many recipients were sent or skipped.
 func (s *Sender) SendDue(ctx context.Context) (int, error) {
 	if ctx.Err() != nil {
@@ -129,6 +131,12 @@ dispatch:
 }
 
 // Run sends due recipients until ctx is canceled, then returns once the mail being sent is done.
+//
+// The workers are kept busy without waiting for a whole batch: whenever the hand-over queue (as
+// many places as workers) is at least half free, more due recipients are claimed (ADR-0003). A
+// slow mail therefore holds up only its own worker, not the next claim. On cancel no new mail
+// starts: mail being sent is finished and recorded, and claimed recipients not yet started are
+// released (AC-R001-14).
 func (s *Sender) Run(ctx context.Context, idle time.Duration) {
 	if n, err := s.Queue.RequeueInterrupted(ctx); err != nil {
 		s.logger().Error("requeue interrupted recipients", "error", err)
@@ -136,21 +144,66 @@ func (s *Sender) Run(ctx context.Context, idle time.Duration) {
 		s.logger().Warn("requeued recipients interrupted by a previous stop", "count", n)
 	}
 
-	for {
-		n, err := s.SendDue(ctx)
+	workCtx := context.WithoutCancel(ctx) // sending and recording must not be cut off halfway
+	queue := make(chan Job, s.concurrency())
+	taken := make(chan struct{}, 1) // a worker took a job: there may be room to claim more
+
+	var mu sync.Mutex
+	var unsent []int64 // claimed but not started because of the stop signal
+	var wg sync.WaitGroup
+	for range s.concurrency() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range queue {
+				select {
+				case taken <- struct{}{}:
+				default:
+				}
+				if ctx.Err() != nil {
+					mu.Lock()
+					unsent = append(unsent, j.RecipientID)
+					mu.Unlock()
+					continue
+				}
+				s.process(workCtx, j)
+			}
+		}()
+	}
+
+	// Claim once at least half of the queue is free, so that one claim (one database round trip)
+	// covers many mails while the other half keeps the workers busy
+	threshold := max(1, cap(queue)/2)
+	for ctx.Err() == nil {
+		room := cap(queue) - len(queue)
+		if room < threshold {
+			select {
+			case <-ctx.Done():
+			case <-taken:
+			}
+			continue
+		}
+		jobs, err := s.Queue.Claim(ctx, s.now(), min(room, s.batchSize()))
 		if err != nil && ctx.Err() == nil {
 			s.logger().Error("claim due recipients", "error", err)
 		}
-		if ctx.Err() != nil {
-			return
+		for _, j := range jobs {
+			queue <- j // never blocks: only this loop adds, and there was room for all of them
 		}
-		if n > 0 && err == nil {
-			continue
+		if len(jobs) == 0 || err != nil {
+			select {
+			case <-ctx.Done():
+			case <-time.After(idle):
+			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(idle):
+	}
+	close(queue)
+	wg.Wait()
+
+	if len(unsent) > 0 {
+		if err := s.Queue.Release(workCtx, unsent); err != nil {
+			// They stay "sending" and are requeued on the next start; nothing was sent to them.
+			s.logger().Error("release unsent recipients", "error", err, "count", len(unsent))
 		}
 	}
 }
