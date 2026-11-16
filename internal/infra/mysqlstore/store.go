@@ -56,8 +56,19 @@ func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 }
 
 // Create saves the delivery and all recipients in one transaction (AC-R001-01).
-func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) (err error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+//
+// Inserting the recipients could deadlock with a claim running at the same time: under the default
+// REPEATABLE READ, the claim's locking read also locks the gaps of the pending recipients' index, which
+// the insert needs. Both run under READ COMMITTED, which takes no gap locks (ADR-0003), and a deadlock
+// that still happens is rolled back and run again, like the claim. Otherwise the business app gets a
+// 503 and waits for its own retry, which can take minutes (found in the chaos drill of team-ops
+// spec 009, 2026-11-16).
+func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) error {
+	return retryOnLockConflict(func() error { return s.create(ctx, d) })
+}
+
+func (s *Store) create(ctx context.Context, d usecase.NewDelivery) (err error) {
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -130,7 +141,7 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 }
 
 func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []usecase.Job, err error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
 	}

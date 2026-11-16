@@ -227,6 +227,53 @@ func TestClaimAndRecord(t *testing.T) {
 	})
 }
 
+func TestCreateWhileClaiming(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("AC-R001-01 deliveries accepted while recipients are being claimed are all saved", func(t *testing.T) {
+		s := openTestDB(t)
+		stop := make(chan struct{})
+		var claimers sync.WaitGroup
+		for range 4 {
+			claimers.Add(1)
+			go func() {
+				defer claimers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := s.Claim(ctx, t0, 50); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}()
+		}
+		var creators sync.WaitGroup
+		for i := range 40 {
+			creators.Add(1)
+			go func() {
+				defer creators.Done()
+				emails := make([]string, 30)
+				for j := range emails {
+					emails[j] = "a@example.invalid"
+				}
+				if err := s.Create(ctx, newDelivery(fmt.Sprintf("key-concurrent-%03d", i), emails...)); err != nil {
+					t.Errorf("Create %d: %v", i, err)
+				}
+			}()
+		}
+		creators.Wait()
+		close(stop)
+		claimers.Wait()
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients`); n != 40*30 {
+			t.Fatalf("%d recipients saved, want %d", n, 40*30)
+		}
+	})
+}
+
 func mustCreate(t *testing.T, s *Store, d usecase.NewDelivery) {
 	t.Helper()
 	if err := s.Create(context.Background(), d); err != nil {
