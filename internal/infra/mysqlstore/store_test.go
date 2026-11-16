@@ -373,7 +373,7 @@ func TestRecordConcurrently(t *testing.T) {
 func TestRecordsKeepOnlyWhatIsNeeded(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("ADR-0003 a hash of the address remains after the address is deleted", func(t *testing.T) {
+	t.Run("team-ops ADR-0003 a hash of the address remains after the address is deleted", func(t *testing.T) {
 		s := openTestDB(t)
 		mustCreate(t, s, newDelivery("key-00000030", "coach@example.invalid"))
 		jobs, _ := s.Claim(ctx, t0, 10)

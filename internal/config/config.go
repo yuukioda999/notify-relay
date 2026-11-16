@@ -30,7 +30,7 @@ type Config struct {
 	DatabaseDSN string
 	// SigningKeys maps X-Relay-Key-Id to the shared secret. More than one key allows rotation.
 	SigningKeys map[string][]byte
-	// EmailRefKey keys the email_ref kept in logs and delivery records (ADR-0003).
+	// EmailRefKey keys the email_ref kept in logs and delivery records (team-ops ADR-0003).
 	EmailRefKey []byte
 	// SendConcurrency is how many mails are sent at once (AC-R001-08).
 	SendConcurrency int

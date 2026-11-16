@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/yuukioda999/notify-relay/internal/usecase"
 )
 
 func TestRetryOnLockConflict(t *testing.T) {
@@ -61,6 +63,7 @@ func TestRetryOnDeadlock(t *testing.T) {
 		{name: "AC-R001-01 an accept gives up after three deadlocks", errs: []error{deadlock, deadlock, deadlock}, wantRuns: 3, wantError: deadlock},
 		{name: "AC-R001-01 a lock wait timeout is not waited for again (it outlasts the request)", errs: []error{lockWait}, wantRuns: 1, wantError: lockWait},
 		{name: "AC-R001-03 a duplicate dedupe key is not run again (the use case answers it)", errs: []error{duplicate}, wantRuns: 1, wantError: duplicate},
+		{name: "AC-R001-03 the duplicate key error create returns is not run again", errs: []error{usecase.ErrDuplicateDedupeKey}, wantRuns: 1, wantError: usecase.ErrDuplicateDedupeKey},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

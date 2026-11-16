@@ -24,7 +24,7 @@ const (
 // Store implements usecase.DeliveryStore and usecase.SendQueue.
 type Store struct {
 	DB *sql.DB
-	// RefKey makes the email_ref kept after the address is deleted (ADR-0003).
+	// RefKey makes the email_ref kept after the address is deleted (team-ops ADR-0003).
 	RefKey domain.EmailRefKey
 }
 
@@ -141,8 +141,9 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 }
 
 func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []usecase.Job, err error) {
-	// READ COMMITTED (notify-relay ADR-0003): the locking read takes no gap locks, so accepting new
-	// deliveries at the same time does not deadlock with it. Nothing here reads a row twice to decide
+	// READ COMMITTED (notify-relay ADR-0003): the locking read and the update take no gap locks, so
+	// accepting new deliveries at the same time no longer deadlocks on those gaps; a deadlock that still
+	// happens is retried (Claim). Nothing here reads a row twice to decide
 	// something; if that is ever added, review the ADR first.
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {

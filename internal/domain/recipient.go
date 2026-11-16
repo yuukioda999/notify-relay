@@ -15,7 +15,7 @@ const (
 )
 
 // IsFinal reports whether the status will never change again. The address is deleted
-// as soon as a recipient reaches a final status (ADR-0003, AC-R001-15).
+// as soon as a recipient reaches a final status (team-ops ADR-0003, AC-R001-15).
 func (s RecipientStatus) IsFinal() bool {
 	return s == StatusDelivered || s == StatusFailed || s == StatusSkipped
 }
