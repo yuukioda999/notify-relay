@@ -1,29 +1,46 @@
 # ADR-0003: 受け付けと取り出しのトランザクションを READ COMMITTED にする
 
-- ステータス: 提案中
+- ステータス: 承認
 - 日付: 2026-11-16
 - 決定者: 小田 裕貴
 - 関連: ADR-0002(二重送信が起こりうる時間)、AC-R001-01・08、team-ops の障害訓練(spec 009)の振り返り「notify-relay の停止」
+- 番号について:このリポジトリのコードのコメントにある「ADR-0003」の多くは、team-ops の ADR-0003(個人情報を最小にする)を指す。この ADR を指すときは「notify-relay の ADR-0003」と書く
 
 ## コンテキスト
 
-- team-ops の障害訓練で、100件の配信依頼が一度に届いたとき、依頼の受け付け(依頼と宛先の行の insert)が MySQL の deadlock(Error 1213)で失敗した。受け付けはやり直さずに 503 を返すので、業務アプリは自分の送り直しの間隔(数分)を待ち、1件が約6分遅れた
-- 相手は送信の取り出し(`SELECT ... FOR UPDATE SKIP LOCKED` と `UPDATE`)。MySQL の既定の分離レベル(REPEATABLE READ)では、ロックを取る読み取りが、行に加えて索引のすき間(gap)もロックする。宛先の insert は、そのすき間に入るためのロックを待ち、取り出しの側も insert の行を待つと deadlock になる
-- 取り出しでは、すでに deadlock をやり直している(数回)
+- team-ops の障害訓練で、依頼の受け付け(依頼と宛先の行の insert)が MySQL の deadlock(Error 1213)で失敗することが、何度もあった(エラーを数え始めてからの10の run のうち5つ)。受け付けはやり直さずに 503 を返すので、業務アプリは自分の送り直しの間隔(数分)を待つ。1件が約6分遅れた回があり、この失敗が原因と見ている
+- 送信の取り出し(`SELECT ... FOR UPDATE SKIP LOCKED` で宛先を選び、`UPDATE ... SET status = 'sending'`)では、すでに deadlock を3回までやり直している
+- 訓練の環境(MySQL 8.4)で取った deadlock の記録(2026-11-16、team-ops の run 43861779973。アドレスは伏せた。行の中身は省いた):
+
+```
+*** (1) TRANSACTION:
+INSERT INTO delivery_recipients (delivery_id, recipient_ref, email, email_ref, status, next_attempt_at, updated_at) VALUES (...)
+*** (1) HOLDS THE LOCK(S):
+index PRIMARY of table `notify_relay`.`delivery_recipients` lock_mode X locks rec but not gap
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+index delivery_recipients_due_index of table `notify_relay`.`delivery_recipients` lock_mode X locks gap before rec insert intention waiting
+*** (2) TRANSACTION:
+UPDATE delivery_recipients SET status = 'sending', updated_at = ... WHERE id IN (1,2,3,...)
+*** (2) HOLDS THE LOCK(S):
+index delivery_recipients_due_index of table `notify_relay`.`delivery_recipients` lock_mode X locks gap before rec
+```
+
+- 読み方:受け付けの insert は、宛先の索引(`delivery_recipients_due_index`、状態と送る時刻)のすき間に入るためのロック(insert intention)を待っている。そのすき間を、取り出しの UPDATE がすき間のロック(gap lock)で押さえている。MySQL の既定の分離レベル(REPEATABLE READ)では、ロックを取る読み取りと更新が、行に加えて索引のすき間もロックするためと見ている。取り出しの側が何を待っていたかは、記録の出力の行数の上限で切れていて、確かめていない
+- 手元の MariaDB では、取り出しと受け付けを同時に走らせるテストで同じ形の deadlock が再現した。CI の MySQL 8.4 では、同じテストで再現しなかった(1回に取り出す数が訓練より少なかった。テストの取り出しの数を、本番と同じ500にした)
 
 ## 検討した選択肢
 
 | 案 | 内容 | 評価 |
 |---|---|---|
-| A | 受け付けでも、取り出しと同じく deadlock を3回までやり直す | 小さな変更。ただし、取り出し4つと受け付け40件を同時に走らせるテストでは、3回のやり直しでも 20回中で失敗が出た |
-| **B(提案)** | A に加えて、受け付けと取り出しのトランザクションを READ COMMITTED にする | すき間のロックを取らないので、deadlock そのものがほぼ起きなくなる。同じテストを100回動かして失敗0 |
-| C | やり直しの回数を増やす | 混んでいるほど待ちが延び、根本の原因が残る |
+| A | 受け付けでも、取り出しと同じく deadlock を3回までやり直す | 小さな変更。ただし、手元の MariaDB で取り出しと受け付けを同時に走らせるテストでは、3回のやり直しでも失敗が残った(30回中2回) |
+| **B(採用)** | A に加えて、受け付けと取り出しのトランザクションを READ COMMITTED にする | 取り出しの読み取りと更新が、すき間のロックを取らなくなる。同じテストで失敗0(30回と100回) |
+| C | やり直しの回数を増やす | 混んでいるほど待ちが延び、原因が残る |
 
-## 決定(提案)
+## 決定
 
 - 受け付け(`Create`)と取り出し(`claim`)のトランザクションを READ COMMITTED で始める
-- 受け付けも、deadlock とロック待ちの時間切れのときは、取り出しと同じく3回までやり直す
-- 結果の記録(`record`)と webhook の処理は変えない(今回の deadlock とは関係がない)
+- 受け付けも deadlock のときは3回までやり直す。ロック待ちの時間切れ(既定50秒)は、HTTP の応答の時間(30秒)より長いので、やり直さない
+- 結果の記録(`record`)と webhook の処理は変えない。どちらも deadlock をやり直していて、訓練で出た deadlock(記録どうし、webhook のイベントどうし)は、やり直しで済んでいる
 
 ## 結果
 
@@ -33,10 +50,12 @@
 
 悪くなること・受け入れるコスト:
 
-- READ COMMITTED では、同じトランザクションの中で同じ行を2回読むと、ほかのトランザクションが確定した変更が見える。受け付けは insert だけ、取り出しは「ロックを取って読み、その行を更新する」だけなので、2回読んで比べる処理はない。同じ宛先を2つの取り出しに渡さないことは、行のロック(`FOR UPDATE SKIP LOCKED`)で守られ、既存のテスト(AC-R001-08)で確かめている
-- 分離レベルの違いを知らずに、取り出しのトランザクションに読み直しの処理を足すと、思わぬ結果になりうる。コードのコメントにこの ADR を書く
+- READ COMMITTED でも、外部キーの確認と重複キーの確認では、すき間のロックを取る。受け付けはこの両方をする(依頼への外部キー、2つの一意索引)。deadlock が0になるわけではないので、やり直しを残す
+- READ COMMITTED では、同じトランザクションの中で同じ行を2回読むと、ほかのトランザクションが確定した変更が見える。受け付けは insert だけ、取り出しは「ロックを取って読み、その行を更新する」だけで、2回読んで比べる処理はない。同じ宛先を2つの取り出しに渡さないことは、行のロック(`FOR UPDATE SKIP LOCKED`)で守り、受け付けと同時に動かすテスト(AC-R001-08)で確かめている
+- 分離レベルの違いを知らずに、取り出しのトランザクションに読み直しの処理を足すと、思わぬ結果になりうる。`claim` のコメントにこの ADR を書いた
+- 前提:READ COMMITTED では、MySQL のバイナリログが行の形式(ROW)である必要がある。MySQL 8.4 の既定は ROW で、team-ops の compose は変えていない
 
 ## 見直す条件
 
 - 受け付けや取り出しに、同じ行を読み直して判断する処理を足すとき
-- READ COMMITTED でも deadlock が続くとき(ログの `accept delivery` で分かる)
+- READ COMMITTED でも、受け付けの deadlock が続くとき(ログの `accept delivery` で分かる)

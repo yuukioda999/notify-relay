@@ -230,8 +230,20 @@ func TestClaimAndRecord(t *testing.T) {
 func TestCreateWhileClaiming(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("AC-R001-01 deliveries accepted while recipients are being claimed are all saved", func(t *testing.T) {
+	t.Run("AC-R001-01 AC-R001-08 deliveries accepted while recipients are claimed are all saved, and each recipient is claimed once", func(t *testing.T) {
 		s := openTestDB(t)
+		var mu sync.Mutex
+		seen := map[int64]int{}
+		claim := func() (int, error) {
+			jobs, err := s.Claim(ctx, t0, 500) // as many as the sender claims at a time
+			mu.Lock()
+			for _, j := range jobs {
+				seen[j.RecipientID]++
+			}
+			mu.Unlock()
+			return len(jobs), err
+		}
+
 		stop := make(chan struct{})
 		var claimers sync.WaitGroup
 		for range 4 {
@@ -244,7 +256,7 @@ func TestCreateWhileClaiming(t *testing.T) {
 						return
 					default:
 					}
-					if _, err := s.Claim(ctx, t0, 50); err != nil {
+					if _, err := claim(); err != nil {
 						t.Error(err)
 						return
 					}
@@ -268,8 +280,26 @@ func TestCreateWhileClaiming(t *testing.T) {
 		creators.Wait()
 		close(stop)
 		claimers.Wait()
+		// Claim what is left, then every recipient must have been handed out exactly once
+		for {
+			n, err := claim()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+		}
 		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients`); n != 40*30 {
 			t.Fatalf("%d recipients saved, want %d", n, 40*30)
+		}
+		if len(seen) != 40*30 {
+			t.Fatalf("claimed %d distinct recipients, want %d", len(seen), 40*30)
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Fatalf("recipient %d claimed %d times", id, n)
+			}
 		}
 	})
 }

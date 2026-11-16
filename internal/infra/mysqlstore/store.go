@@ -59,12 +59,12 @@ func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 //
 // Inserting the recipients could deadlock with a claim running at the same time: under the default
 // REPEATABLE READ, the claim's locking read also locks the gaps of the pending recipients' index, which
-// the insert needs. Both run under READ COMMITTED, which takes no gap locks (ADR-0003), and a deadlock
-// that still happens is rolled back and run again, like the claim. Otherwise the business app gets a
+// the insert needs. Both run under READ COMMITTED, which takes no gap locks for those reads (notify-relay
+// ADR-0003), and a deadlock that still happens is rolled back and run again. Otherwise the business app gets a
 // 503 and waits for its own retry, which can take minutes (found in the chaos drill of team-ops
 // spec 009, 2026-11-16).
 func (s *Store) Create(ctx context.Context, d usecase.NewDelivery) error {
-	return retryOnLockConflict(func() error { return s.create(ctx, d) })
+	return retryOnDeadlock(func() error { return s.create(ctx, d) })
 }
 
 func (s *Store) create(ctx context.Context, d usecase.NewDelivery) (err error) {
@@ -141,6 +141,9 @@ func (s *Store) Claim(ctx context.Context, now time.Time, limit int) (jobs []use
 }
 
 func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []usecase.Job, err error) {
+	// READ COMMITTED (notify-relay ADR-0003): the locking read takes no gap locks, so accepting new
+	// deliveries at the same time does not deadlock with it. Nothing here reads a row twice to decide
+	// something; if that is ever added, review the ADR first.
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
@@ -225,12 +228,26 @@ func (s *Store) Record(ctx context.Context, recipientID int64, o usecase.Outcome
 // lockConflictAttempts is how many times a transaction that lost a lock conflict is run.
 const lockConflictAttempts = 3
 
-// retryOnLockConflict runs fn again when MySQL rolled it back for a deadlock or a lock wait
-// timeout. Both roll back the whole transaction, so running it again is safe.
+// retryOnLockConflict runs fn again when it failed on a deadlock or a lock wait timeout. MySQL rolls
+// back the whole transaction on a deadlock, but only the statement on a lock wait timeout (by
+// default); running fn again is safe because fn itself rolls its transaction back on any error.
 func retryOnLockConflict(fn func() error) error {
+	return retryWhile(isLockConflict, fn)
+}
+
+// retryOnDeadlock is retryOnLockConflict for deadlocks only. A lock wait timeout takes 50 seconds by
+// default, longer than the HTTP request may take, so the accept does not wait for it again.
+func retryOnDeadlock(fn func() error) error {
+	return retryWhile(func(err error) bool {
+		var me *mysql.MySQLError
+		return errors.As(err, &me) && me.Number == mysqlDeadlock
+	}, fn)
+}
+
+func retryWhile(retry func(error) bool, fn func() error) error {
 	var err error
 	for attempt := range lockConflictAttempts {
-		if err = fn(); !isLockConflict(err) {
+		if err = fn(); !retry(err) {
 			return err
 		}
 		if attempt < lockConflictAttempts-1 {
