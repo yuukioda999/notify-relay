@@ -234,7 +234,7 @@ func TestCreateWhileClaiming(t *testing.T) {
 		s := openTestDB(t)
 		stop := make(chan struct{})
 		var claimers sync.WaitGroup
-		for range 4 {
+		for range 8 {
 			claimers.Add(1)
 			go func() {
 				defer claimers.Done()
@@ -244,15 +244,24 @@ func TestCreateWhileClaiming(t *testing.T) {
 						return
 					default:
 					}
-					if _, err := s.Claim(ctx, t0, 50); err != nil {
+					jobs, err := s.Claim(ctx, t0, 50)
+					if err != nil {
 						t.Error(err)
+						logDeadlock(t)
 						return
+					}
+					for _, j := range jobs {
+						if err := s.Record(ctx, j.RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0); err != nil {
+							t.Error(err)
+							logDeadlock(t)
+							return
+						}
 					}
 				}
 			}()
 		}
 		var creators sync.WaitGroup
-		for i := range 40 {
+		for i := range 100 {
 			creators.Add(1)
 			go func() {
 				defer creators.Done()
@@ -269,8 +278,8 @@ func TestCreateWhileClaiming(t *testing.T) {
 		creators.Wait()
 		close(stop)
 		claimers.Wait()
-		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients`); n != 40*30 {
-			t.Fatalf("%d recipients saved, want %d", n, 40*30)
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients`); n != 100*30 {
+			t.Fatalf("%d recipients saved, want %d", n, 100*30)
 		}
 	})
 }
