@@ -227,6 +227,83 @@ func TestClaimAndRecord(t *testing.T) {
 	})
 }
 
+func TestCreateWhileClaiming(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("AC-R001-01 AC-R001-08 deliveries accepted while recipients are claimed are all saved, and each recipient is claimed once", func(t *testing.T) {
+		s := openTestDB(t)
+		var mu sync.Mutex
+		seen := map[int64]int{}
+		claim := func() (int, error) {
+			jobs, err := s.Claim(ctx, t0, 500) // as many as the sender claims at a time
+			mu.Lock()
+			for _, j := range jobs {
+				seen[j.RecipientID]++
+			}
+			mu.Unlock()
+			return len(jobs), err
+		}
+
+		stop := make(chan struct{})
+		var claimers sync.WaitGroup
+		for range 4 {
+			claimers.Add(1)
+			go func() {
+				defer claimers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := claim(); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}()
+		}
+		var creators sync.WaitGroup
+		for i := range 40 {
+			creators.Add(1)
+			go func() {
+				defer creators.Done()
+				emails := make([]string, 30)
+				for j := range emails {
+					emails[j] = "a@example.invalid"
+				}
+				if err := s.Create(ctx, newDelivery(fmt.Sprintf("key-concurrent-%03d", i), emails...)); err != nil {
+					t.Errorf("Create %d: %v", i, err)
+				}
+			}()
+		}
+		creators.Wait()
+		close(stop)
+		claimers.Wait()
+		// Claim what is left, then every recipient must have been handed out exactly once
+		for {
+			n, err := claim()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+		}
+		if n := count(t, s.DB, `SELECT COUNT(*) FROM delivery_recipients`); n != 40*30 {
+			t.Fatalf("%d recipients saved, want %d", n, 40*30)
+		}
+		if len(seen) != 40*30 {
+			t.Fatalf("claimed %d distinct recipients, want %d", len(seen), 40*30)
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Fatalf("recipient %d claimed %d times", id, n)
+			}
+		}
+	})
+}
+
 func mustCreate(t *testing.T, s *Store, d usecase.NewDelivery) {
 	t.Helper()
 	if err := s.Create(context.Background(), d); err != nil {
@@ -296,7 +373,7 @@ func TestRecordConcurrently(t *testing.T) {
 func TestRecordsKeepOnlyWhatIsNeeded(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("ADR-0003 a hash of the address remains after the address is deleted", func(t *testing.T) {
+	t.Run("team-ops ADR-0003 a hash of the address remains after the address is deleted", func(t *testing.T) {
 		s := openTestDB(t)
 		mustCreate(t, s, newDelivery("key-00000030", "coach@example.invalid"))
 		jobs, _ := s.Claim(ctx, t0, 10)

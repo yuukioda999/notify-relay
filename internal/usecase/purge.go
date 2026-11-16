@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Retention is how long a delivery is kept after it was accepted (AC-R001-22, ADR-0003).
+// Retention is how long a delivery is kept after it was accepted (AC-R001-22, team-ops ADR-0003).
 const Retention = 7 * 24 * time.Hour
 
 // PurgeBatch is how many deliveries one delete statement removes, so the table is not locked for long.

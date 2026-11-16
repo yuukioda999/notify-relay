@@ -70,7 +70,7 @@ type Sender struct {
 	// DemoMode skips any address outside .invalid right before sending, in addition to the
 	// check at acceptance, so a demo environment can never mail a real person (AC-R001-06).
 	DemoMode bool
-	// RefKey makes the email_ref written to the logs instead of the address (ADR-0003).
+	// RefKey makes the email_ref written to the logs instead of the address (team-ops ADR-0003).
 	RefKey domain.EmailRefKey
 	Logger *slog.Logger
 	Now    func() time.Time

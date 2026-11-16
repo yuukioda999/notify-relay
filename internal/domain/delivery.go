@@ -179,7 +179,7 @@ func IsDemoAddress(email string) bool {
 const MinEmailRefKeyBytes = 32
 
 // EmailRefKey is the secret for the value logs and delivery records keep instead of an
-// address (CLAUDE.md, ADR-0003 "配信記録にはハッシュ値だけを残す"). The value is keyed so that
+// address (CLAUDE.md, team-ops ADR-0003 "配信記録にはハッシュ値だけを残す"). The value is keyed so that
 // someone who can read the logs cannot test a guessed address against them.
 type EmailRefKey []byte
 
