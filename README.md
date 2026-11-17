@@ -2,9 +2,24 @@
 
 業務アプリから配信依頼を受け取り、メールを並行送信するGo製の内部サービスです。
 
+**少年スポーツチーム運営ツール [team-ops](https://github.com/yuukioda999/team-ops) の、メール配信を受け持つ部分**として作りました。運営ツールは4つのリポジトリでできていて、notify-relay はその1つです。業務ロジックを持たないので、ほかの業務アプリからも使える形にしています(OSS)。
+
+| リポジトリ | 役割 |
+|---|---|
+| [team-ops](https://github.com/yuukioda999/team-ops) | 入口。要件・全体の設計判断(ADR)・機能仕様、ローカル環境の起動、負荷試験・障害訓練の結果 |
+| [team-ops-api](https://github.com/yuukioda999/team-ops-api) | Laravel の API。誰に何を送るかを決め、配信依頼を notify-relay に送る |
+| [team-ops-web](https://github.com/yuukioda999/team-ops-web) | React の画面。notify-relay は直接呼ばない |
+| **notify-relay(ここ)** | Go。依頼を受けてメールを送り、結果を webhook で API に返す |
+
+```
+保護者のスマホ ── team-ops-web ── team-ops-api ──(配信依頼)──> notify-relay ──(SMTP)──> メール
+                                        ^                          |
+                                        └──(送信結果の webhook)────┘
+```
+
 > **現在の状況(2026年11月):team-ops の第1弾(001〜007)で使う機能が完成**
 > 配信依頼の受付(署名検証・重複防止)、SMTP での並行送信(同時に送る数の上限つき)、一時エラーの再送、結果の webhook(まとめ送りと再送)、照会 API、保持期間を過ぎたデータの削除を実装済みです。
-> システム全体の要件・設計判断と、ローカル環境の起動方法は [team-ops](https://github.com/yuukioda999/team-ops) にまとめています。
+> team-ops で負荷試験と障害訓練を行い、見つかった不具合(受け付けと送信の取り出しの deadlock)を直しました。結果は下の「確かめたこと」にあります。
 
 ## できること
 
@@ -16,9 +31,16 @@
 
 ## これから
 
-- 送信先サービスの上限に合わせた、秒あたりの流量制御
-- サービスをまたいだトレース ID で、1通のメールを送信まで追跡(team-ops の T32)
-- 目標性能(30万通を10分以内に送信完了)の負荷試験。結果は team-ops に公開します
+- 送信先サービスの上限に合わせた、秒あたりの流量制御と、チーム間で公平な順番の制御(team-ops の第2弾)
+- サービスをまたいだトレース ID で、1通のメールを送信まで追跡
+
+## 確かめたこと
+
+負荷試験と障害訓練は、team-ops の GitHub Actions で、運営ツールのすべてのサービスを動かして行いました。
+
+- [負荷試験](https://github.com/yuukioda999/team-ops/blob/main/loadtest/README.md):30万通(1万チーム)。運営ツール全体の試験では、最後の1通まで 418・576秒(目標 600秒)。notify-relay 単体の試験は、5回中2回しか 600秒に入らず、まだ満たせていません
+- [障害訓練の振り返り](https://github.com/yuukioda999/team-ops/tree/main/docs/postmortems):SMTP の一時エラー・恒久エラー、notify-relay の停止と強制終了など。どれも取りこぼしは0。強制終了では、送信中だったメールが二重に届きうる(最大で同時に送る数。[ADR-0002](docs/adr/0002-double-send-window.md))ことを、数で確かめました
+- 訓練で、受け付けが送信の取り出しと MySQL の deadlock になる不具合が見つかり、直しました([ADR-0003](docs/adr/0003-read-committed-for-accept-and-claim.md))
 
 ## 設計方針
 
@@ -56,7 +78,7 @@
 
 ## 利用例
 
-少年スポーツチーム運営ツール [team-ops](https://github.com/yuukioda999/team-ops) のお知らせ配信で使用しています。
+少年スポーツチーム運営ツール [team-ops](https://github.com/yuukioda999/team-ops) のお知らせ配信(予約送信・未読の人への再通知を含む)で使っています。
 
 ## ライセンス
 
