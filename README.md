@@ -28,11 +28,11 @@
 - 重複防止キーによる二重配信の防止
 - 送信結果を、署名付きの webhook でまとめて業務アプリに通知(届かなければ再送)
 - 配信の件数の照会 API と、保持期間を過ぎたデータの削除
+- OpenTelemetry のトレースとメトリクス。業務アプリから受け取った traceparent を引き継ぎ、受付 → 送信 → webhook を1本のトレースで追える([ADR-0004](docs/adr/0004-opentelemetry.md))
 
 ## これから
 
 - 送信先サービスの上限に合わせた、秒あたりの流量制御と、チーム間で公平な順番の制御(team-ops の第2弾)
-- サービスをまたいだトレース ID で、1通のメールを送信まで追跡
 
 ## 確かめたこと
 
@@ -66,6 +66,8 @@
 | `RECIPIENTS_INVALID_ONLY` | | `false` | `true` のとき `.invalid` ドメイン以外の宛先を拒否する(team-ops-api と同じ名前) |
 | `DEMO_MODE` | | `false` | `RECIPIENTS_INVALID_ONLY` の別名。どちらかが `true` なら宛先を制限する |
 | `PORT` / `SHUTDOWN_TIMEOUT` | | `8080` / `30s` | 待ち受けポートと、停止時に送信の完了を待つ時間 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | | | トレースとメトリクスの送り先(OTLP の HTTP。例:`http://otel-lgtm:4318`)。未設定なら送らない。そのほかの `OTEL_*`(`OTEL_SERVICE_NAME`、`OTEL_METRIC_EXPORT_INTERVAL` など)も OpenTelemetry の標準どおりに効く |
+| `OTEL_SDK_DISABLED` | | `false` | `true` のときトレースとメトリクスを送らない(負荷試験で使う) |
 
 ## 運用上の前提
 

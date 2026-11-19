@@ -52,9 +52,10 @@ type AcceptResult struct {
 
 // Acceptor handles incoming delivery requests (AC-R001-01, 03, 04, 06).
 type Acceptor struct {
-	Store    DeliveryStore
-	DemoMode bool
-	Now      func() time.Time
+	Store     DeliveryStore
+	DemoMode  bool
+	Now       func() time.Time
+	Telemetry Telemetry
 }
 
 // Accept validates and stores the request. The request is saved, recipients included,
@@ -97,6 +98,7 @@ func (a *Acceptor) Accept(ctx context.Context, req domain.Request, traceparent s
 	if err != nil {
 		return AcceptResult{}, err
 	}
+	telemetryOr(a.Telemetry).Accepted(ctx, acc.RecipientCount)
 	return AcceptResult{Accepted: acc, Created: true}, nil
 }
 

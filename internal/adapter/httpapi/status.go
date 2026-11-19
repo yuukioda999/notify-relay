@@ -37,7 +37,7 @@ func handleGetDelivery(reader usecase.StatusReader, logger *slog.Logger) http.Ha
 			writeProblem(w, http.StatusNotFound, "Delivery not found", nil)
 			return
 		case err != nil:
-			logger.Error("read delivery status", "error", err, "delivery_id", id)
+			logger.ErrorContext(r.Context(), "read delivery status", "error", err, "delivery_id", id)
 			writeProblem(w, http.StatusServiceUnavailable, "Delivery status could not be read; retry later", nil)
 			return
 		}

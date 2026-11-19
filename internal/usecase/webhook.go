@@ -62,10 +62,11 @@ type WebhookSender interface {
 
 // Notifier turns results into webhook events and sends them (AC-R001-16 to 20).
 type Notifier struct {
-	Store  WebhookStore
-	Sender WebhookSender
-	Now    func() time.Time
-	Logger *slog.Logger
+	Store     WebhookStore
+	Sender    WebhookSender
+	Now       func() time.Time
+	Logger    *slog.Logger
+	Telemetry Telemetry
 }
 
 // WebhookRetryDelay is the wait after the given number of failed attempts: 10s, 20s, 40s and so
@@ -112,27 +113,34 @@ func (n *Notifier) Dispatch(ctx context.Context) error {
 }
 
 func (n *Notifier) send(ctx context.Context, e WebhookEvent) {
+	ctx, traceparent, end := telemetryOr(n.Telemetry).StartWebhook(ctx, e.ID, e.Traceparent)
+	e.Traceparent = traceparent
 	log := n.logger().With("event_id", e.ID)
 	attempts := e.Attempts + 1
 	err := n.Sender.Send(ctx, e, n.now())
 	now := n.now()
 	var storeErr error
+	var failure WebhookFailure
 	switch {
 	case err == nil:
 		storeErr = n.Store.MarkEventSent(ctx, e.ID, now)
 	case errors.Is(err, ErrWebhookUnauthorized):
-		log.Error("webhook receiver rejected the signature; not retrying (check WEBHOOK_KEY_ID and the receiver's key)", "attempts", attempts)
+		failure = WebhookUnauthorized
+		log.ErrorContext(ctx, "webhook receiver rejected the signature; not retrying (check WEBHOOK_KEY_ID and the receiver's key)", "attempts", attempts)
 		storeErr = n.Store.GiveUpEvent(ctx, e.ID, attempts, now)
 	case now.Sub(e.CreatedAt) >= WebhookGiveUpAfter:
-		log.Error("webhook was not accepted for 24 hours; giving up", "attempts", attempts, "error", err)
+		failure = WebhookGaveUp
+		log.ErrorContext(ctx, "webhook was not accepted for 24 hours; giving up", "attempts", attempts, "error", err)
 		storeErr = n.Store.GiveUpEvent(ctx, e.ID, attempts, now)
 	default:
-		log.Warn("webhook was not accepted; will retry", "attempts", attempts, "error", err)
+		failure = WebhookRetrying
+		log.WarnContext(ctx, "webhook was not accepted; will retry", "attempts", attempts, "error", err)
 		storeErr = n.Store.RescheduleEvent(ctx, e.ID, attempts, now.Add(WebhookRetryDelay(attempts)))
 	}
+	end(failure)
 	if storeErr != nil {
 		// The lease runs out and the event is sent again; the receiver drops duplicates by event_id.
-		log.Error("record webhook result", "error", storeErr)
+		log.ErrorContext(ctx, "record webhook result", "error", storeErr)
 	}
 }
 

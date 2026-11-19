@@ -186,7 +186,7 @@ func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []use
 	}
 
 	//nolint:gosec // G202: see above
-	rows, err = tx.QueryContext(ctx, `SELECT r.id, r.delivery_id, r.email, r.attempts, d.subject, d.body_text, d.url, d.expires_at
+	rows, err = tx.QueryContext(ctx, `SELECT r.id, r.delivery_id, r.email, r.attempts, d.subject, d.body_text, d.url, d.expires_at, d.traceparent
 		FROM delivery_recipients r JOIN deliveries d ON d.id = r.delivery_id
 		WHERE r.id IN (`+in+`) ORDER BY r.id`, ids...)
 	if err != nil {
@@ -196,14 +196,15 @@ func (s *Store) claim(ctx context.Context, now time.Time, limit int) (jobs []use
 	for rows.Next() {
 		var j usecase.Job
 		var deliveryID string
-		var url, text sql.NullString
+		var url, text, traceparent sql.NullString
 		var expires sql.NullTime
-		if err = rows.Scan(&j.RecipientID, &deliveryID, &j.Email, &j.Attempts, &j.Message.Subject, &text, &url, &expires); err != nil {
+		if err = rows.Scan(&j.RecipientID, &deliveryID, &j.Email, &j.Attempts, &j.Message.Subject, &text, &url, &expires, &traceparent); err != nil {
 			return nil, err
 		}
 		j.DeliveryID = domain.DeliveryID(deliveryID)
 		j.Message.URL = url.String
 		j.Message.Text = text.String
+		j.Traceparent = traceparent.String
 		if expires.Valid {
 			t := expires.Time
 			j.ExpiresAt = &t
@@ -342,6 +343,14 @@ func (s *Store) RequeueInterrupted(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// CountUnsent returns how many recipients are waiting to be sent or being sent (AC-R001-24).
+func (s *Store) CountUnsent(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_recipients WHERE status IN (?, ?)`,
+		string(domain.StatusPending), string(domain.StatusSending)).Scan(&n)
+	return n, err
 }
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }

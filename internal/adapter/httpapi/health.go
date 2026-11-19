@@ -31,6 +31,10 @@ type Deps struct {
 	Keys   map[string][]byte
 	Now    func() time.Time
 	Logger *slog.Logger
+	// Traceparent returns the trace context stored with a new delivery, so sending and webhooks
+	// continue the same trace (AC-R001-25). By default it is the request's traceparent header
+	// when it is well formed.
+	Traceparent func(r *http.Request) string
 }
 
 // NewRouter builds the HTTP routes.
@@ -43,8 +47,11 @@ func NewRouter(d Deps) http.Handler {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
+	if d.Traceparent == nil {
+		d.Traceparent = HeaderTraceparent
+	}
 	if d.Acceptor != nil {
-		mux.Handle("POST /v1/deliveries", requireSignature(d.Keys, d.Now, handleCreateDelivery(d.Acceptor, d.Logger)))
+		mux.Handle("POST /v1/deliveries", requireSignature(d.Keys, d.Now, handleCreateDelivery(d.Acceptor, d.Traceparent, d.Logger)))
 	}
 	if d.Status != nil {
 		mux.Handle("GET /v1/deliveries/{delivery_id}", requireSignature(d.Keys, d.Now, handleGetDelivery(d.Status, d.Logger)))

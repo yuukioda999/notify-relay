@@ -184,6 +184,22 @@ func TestCreateDeliveryPassesTraceparent(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("AC-R001-25 the trace context of the request span is stored when tracing is on", func(t *testing.T) {
+		const spanTrace = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01"
+		acc := &stubAcceptor{result: usecase.AcceptResult{Created: true}}
+		h := NewRouter(Deps{
+			Acceptor:    acc,
+			Keys:        map[string][]byte{"k2026-11": testSecret},
+			Now:         func() time.Time { return testNow },
+			Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Traceparent: func(*http.Request) string { return spanTrace },
+		})
+		h.ServeHTTP(httptest.NewRecorder(), signedRequest(t, validBody))
+		if acc.trace != spanTrace {
+			t.Fatalf("traceparent = %q, want %q", acc.trace, spanTrace)
+		}
+	})
 }
 
 // TestSignKnownVector pins the signature format. team-ops-api tests the same vector, so the

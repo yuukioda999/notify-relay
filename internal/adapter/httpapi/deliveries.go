@@ -30,7 +30,16 @@ type acceptedResponse struct {
 	AcceptedAt     string            `json:"accepted_at"`
 }
 
-func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.HandlerFunc {
+// HeaderTraceparent returns the request's traceparent header, or "" when it is not well formed.
+func HeaderTraceparent(r *http.Request) string {
+	tp := r.Header.Get("traceparent")
+	if !traceparentPattern.MatchString(tp) {
+		return ""
+	}
+	return tp
+}
+
+func handleCreateDelivery(acceptor DeliveryAcceptor, traceparentOf func(*http.Request) string, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, fieldErr, ok := decodeRequest(r.Body)
 		if !ok {
@@ -42,12 +51,7 @@ func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.H
 			return
 		}
 
-		traceparent := r.Header.Get("traceparent")
-		if !traceparentPattern.MatchString(traceparent) {
-			traceparent = ""
-		}
-
-		res, err := acceptor.Accept(r.Context(), req, traceparent)
+		res, err := acceptor.Accept(r.Context(), req, traceparentOf(r))
 		var invalid *domain.ValidationError
 		switch {
 		case errors.As(err, &invalid):
@@ -58,7 +62,7 @@ func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.H
 			return
 		case err != nil:
 			// Nothing was confirmed as saved, so the caller must keep the request and retry (AC-R001-01).
-			logger.Error("accept delivery", "error", err, "dedupe_key", req.DedupeKey)
+			logger.ErrorContext(r.Context(), "accept delivery", "error", err, "dedupe_key", req.DedupeKey)
 			writeProblem(w, http.StatusServiceUnavailable, "Delivery request could not be saved; retry later", nil)
 			return
 		}
@@ -66,7 +70,7 @@ func handleCreateDelivery(acceptor DeliveryAcceptor, logger *slog.Logger) http.H
 		code := http.StatusOK
 		if res.Created {
 			code = http.StatusAccepted
-			logger.Info("delivery accepted", "delivery_id", res.ID, "dedupe_key", res.DedupeKey, "recipient_count", res.RecipientCount)
+			logger.InfoContext(r.Context(), "delivery accepted", "delivery_id", res.ID, "dedupe_key", res.DedupeKey, "recipient_count", res.RecipientCount)
 		}
 		writeJSON(w, code, acceptedResponse{
 			DeliveryID:     res.ID,

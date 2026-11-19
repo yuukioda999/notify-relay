@@ -496,3 +496,40 @@ func TestRecordAfterPurge(t *testing.T) {
 		t.Fatalf("AC-R001-22 Record after the purge = %v, want ErrRecipientGone", err)
 	}
 }
+
+func TestTelemetryReads(t *testing.T) {
+	ctx := context.Background()
+	const tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+	t.Run("AC-R001-25 a claimed recipient carries the traceparent stored at acceptance", func(t *testing.T) {
+		s := openTestDB(t)
+		d := newDelivery("key-00000060", "a@example.invalid")
+		d.Traceparent = tp
+		mustCreate(t, s, d)
+		mustCreate(t, s, newDelivery("key-00000061", "b@example.invalid"))
+
+		jobs, err := s.Claim(ctx, t0, 10)
+		if err != nil || len(jobs) != 2 {
+			t.Fatalf("Claim = %+v, %v", jobs, err)
+		}
+		got := map[string]string{}
+		for _, j := range jobs {
+			got[j.Email] = j.Traceparent
+		}
+		if got["a@example.invalid"] != tp || got["b@example.invalid"] != "" {
+			t.Fatalf("traceparents = %v", got)
+		}
+	})
+
+	t.Run("AC-R001-24 unsent recipients are those waiting and those being sent", func(t *testing.T) {
+		s := openTestDB(t)
+		mustCreate(t, s, newDelivery("key-00000062", "a@example.invalid", "b@example.invalid", "c@example.invalid"))
+		jobs, _ := s.Claim(ctx, t0, 2)
+		_ = s.Record(ctx, jobs[0].RecipientID, usecase.Outcome{Status: domain.StatusDelivered, Attempts: 1}, t0)
+		// 1 delivered, 1 sending, 1 pending.
+		n, err := s.CountUnsent(ctx)
+		if err != nil || n != 2 {
+			t.Fatalf("CountUnsent = %d, %v; want 2", n, err)
+		}
+	})
+}
