@@ -293,7 +293,7 @@ func TestMiddleware(t *testing.T) {
 			}
 			// AC-010-01: no URL, query or address is recorded.
 			for _, kv := range s.Attributes() {
-				if v := kv.Value.Emit(); strings.Contains(v, "@") || strings.Contains(v, "email") || strings.Contains(v, "?") {
+				if v := kv.Value.String(); strings.Contains(v, "@") || strings.Contains(v, "email") || strings.Contains(v, "?") {
 					t.Fatalf("attribute %s = %q leaks the query", kv.Key, v)
 				}
 			}
