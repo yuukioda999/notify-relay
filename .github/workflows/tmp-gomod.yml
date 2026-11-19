@@ -1,0 +1,23 @@
+# Temporary: go.sum cannot be generated in the development environment (no Go module proxy).
+# Removed before the pull request is merged.
+name: tmp-gomod
+on:
+  push:
+    branches: [feat/010-otel]
+permissions:
+  contents: read
+jobs:
+  gomod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: false
+      - run: |
+          go get go.opentelemetry.io/otel@latest go.opentelemetry.io/otel/sdk@latest go.opentelemetry.io/otel/sdk/metric@latest \
+            go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@latest go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@latest
+          go mod tidy
+          echo "=====GOMOD====="; cat go.mod; echo "=====GOSUM====="; cat go.sum; echo "=====END====="
+          go vet ./... && go test -race ./internal/infra/telemetry/ ./internal/usecase/ ./internal/adapter/...

@@ -18,6 +18,7 @@ type Job struct {
 	Message     domain.Message
 	ExpiresAt   *time.Time
 	Attempts    int // attempts made before this one
+	Traceparent string
 }
 
 // Outcome is the result of one attempt, recorded by the store.
@@ -71,9 +72,10 @@ type Sender struct {
 	// check at acceptance, so a demo environment can never mail a real person (AC-R001-06).
 	DemoMode bool
 	// RefKey makes the email_ref written to the logs instead of the address (team-ops ADR-0003).
-	RefKey domain.EmailRefKey
-	Logger *slog.Logger
-	Now    func() time.Time
+	RefKey    domain.EmailRefKey
+	Logger    *slog.Logger
+	Now       func() time.Time
+	Telemetry Telemetry
 }
 
 // SendDue claims one batch and sends it. When ctx is canceled no new mail is started: mail
@@ -158,18 +160,27 @@ func (s *Sender) Run(ctx context.Context, idle time.Duration) {
 func (s *Sender) process(ctx context.Context, j Job) {
 	now := s.now()
 	attempts := j.Attempts + 1
+	ctx, end := telemetryOr(s.Telemetry).StartSend(ctx, SendSpan{
+		DeliveryID: j.DeliveryID, RecipientID: j.RecipientID, Attempt: attempts, Traceparent: j.Traceparent,
+	})
 	log := s.logger().With("delivery_id", j.DeliveryID, "recipient_id", j.RecipientID, "email_ref", s.RefKey.Ref(j.Email))
 
 	var o Outcome
+	mailed := false
+	var took time.Duration
 	switch {
 	case j.ExpiresAt != nil && !now.Before(*j.ExpiresAt):
 		o = Outcome{Status: domain.StatusSkipped, Code: domain.ErrExpired, Attempts: j.Attempts} // AC-R001-12
 	case s.DemoMode && !domain.IsDemoAddress(j.Email):
 		o = Outcome{Status: domain.StatusSkipped, Attempts: j.Attempts}
-		log.Warn("skipped a non-demo address in demo mode")
+		log.WarnContext(ctx, "skipped a non-demo address in demo mode")
 	default:
-		o = outcomeOf(s.Mailer.Send(ctx, Mail{To: j.Email, Message: j.Message}), attempts, now)
+		started := time.Now()
+		err := s.Mailer.Send(ctx, Mail{To: j.Email, Message: j.Message})
+		took, mailed = time.Since(started), true
+		o = outcomeOf(err, attempts, now)
 	}
+	defer func() { end(resultOf(o.Status), o.Code, mailed, took) }()
 
 	// The mail may already be out, so the result is worth a few tries: a recipient left
 	// "sending" would be sent again after a restart.
@@ -178,15 +189,15 @@ func (s *Sender) process(ctx context.Context, j Job) {
 		time.Sleep(delay)
 		err = s.Queue.Record(ctx, j.RecipientID, o, s.now())
 		if err == nil {
-			log.Info("send attempt finished", "status", o.Status, "error_code", o.Code, "attempts", o.Attempts)
+			log.InfoContext(ctx, "send attempt finished", "status", o.Status, "error_code", o.Code, "attempts", o.Attempts)
 			return
 		}
 		if errors.Is(err, ErrRecipientGone) {
-			log.Warn("recipient was deleted before the result was recorded", "status", o.Status)
+			log.WarnContext(ctx, "recipient was deleted before the result was recorded", "status", o.Status)
 			return
 		}
 	}
-	log.Error("record send result", "error", err, "status", o.Status)
+	log.ErrorContext(ctx, "record send result", "error", err, "status", o.Status)
 }
 
 // outcomeOf turns a mailer result into the next state (AC-R001-10, AC-R001-11).

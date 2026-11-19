@@ -18,6 +18,7 @@ import (
 	"github.com/yuukioda999/notify-relay/internal/adapter/webhook"
 	"github.com/yuukioda999/notify-relay/internal/config"
 	"github.com/yuukioda999/notify-relay/internal/infra/mysqlstore"
+	"github.com/yuukioda999/notify-relay/internal/infra/telemetry"
 	"github.com/yuukioda999/notify-relay/internal/usecase"
 )
 
@@ -31,7 +32,7 @@ const webhookInterval = time.Second
 const purgeInterval = time.Hour
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(telemetry.LogHandler{Handler: slog.NewJSONHandler(os.Stdout, nil)})
 	if err := run(logger); err != nil {
 		logger.Error("notify-relay stopped with error", "error", err)
 		os.Exit(1)
@@ -57,6 +58,23 @@ func run(logger *slog.Logger) error {
 	}
 	store := &mysqlstore.Store{DB: db, RefKey: cfg.EmailRefKey}
 
+	// Traces and metrics (AC-R001-24, AC-R001-25). Nothing is exported unless an OTLP endpoint is set.
+	tel, shutdownTelemetry, err := telemetry.Setup(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			logger.Warn("telemetry was not flushed", "error", err)
+		}
+	}()
+	if err := tel.RegisterUnsent(store.CountUnsent); err != nil {
+		return err
+	}
+	logger.Info("telemetry", "exporting", telemetry.Enabled())
+
 	sender := &usecase.Sender{
 		Queue: store,
 		Mailer: &smtpmail.Mailer{
@@ -72,17 +90,19 @@ func run(logger *slog.Logger) error {
 		DemoMode:    cfg.InvalidRecipientsOnly,
 		RefKey:      cfg.EmailRefKey,
 		Logger:      logger,
+		Telemetry:   tel,
 	}
 
 	srv := &http.Server{
 		Addr: cfg.Addr,
-		Handler: httpapi.NewRouter(httpapi.Deps{
-			Checks:   map[string]httpapi.ReadinessCheck{"database": db.PingContext},
-			Acceptor: &usecase.Acceptor{Store: store, DemoMode: cfg.InvalidRecipientsOnly},
-			Status:   store,
-			Keys:     cfg.SigningKeys,
-			Logger:   logger,
-		}),
+		Handler: tel.Middleware(httpapi.NewRouter(httpapi.Deps{
+			Checks:      map[string]httpapi.ReadinessCheck{"database": db.PingContext},
+			Acceptor:    &usecase.Acceptor{Store: store, DemoMode: cfg.InvalidRecipientsOnly, Telemetry: tel},
+			Status:      store,
+			Keys:        cfg.SigningKeys,
+			Logger:      logger,
+			Traceparent: tel.Traceparent,
+		})),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -103,9 +123,10 @@ func run(logger *slog.Logger) error {
 	}()
 	if cfg.Webhook.URL != "" {
 		notifier := &usecase.Notifier{
-			Store:  store,
-			Sender: &webhook.Client{URL: cfg.Webhook.URL, KeyID: cfg.Webhook.KeyID, Secret: cfg.SigningKeys[cfg.Webhook.KeyID]},
-			Logger: logger,
+			Store:     store,
+			Sender:    &webhook.Client{URL: cfg.Webhook.URL, KeyID: cfg.Webhook.KeyID, Secret: cfg.SigningKeys[cfg.Webhook.KeyID]},
+			Logger:    logger,
+			Telemetry: tel,
 		}
 		wg.Add(1)
 		go func() {
